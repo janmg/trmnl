@@ -1,0 +1,758 @@
+openapi: 3.0.0
+info:
+  title: Terminus API
+  version: 1.0.0
+  description: API specification for the Terminus e-ink display server.
+
+servers:
+  - url: https://localhost:2443
+    description: Local development server
+
+components:
+  securitySchemes:
+    jwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    deviceMac:
+      type: apiKey
+      in: header
+      name: ID
+
+  schemas:
+    ProblemDetails:
+      type: object
+      properties:
+        type:
+          type: string
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+        extensions:
+          type: object
+
+    Device:
+      type: object
+      properties:
+        id:
+          type: integer
+        model_id:
+          type: integer
+        playlist_id:
+          type: integer
+          nullable: true
+        label:
+          type: string
+        mac_address:
+          type: string
+        firmware_profile:
+          type: boolean
+        firmware_update:
+          type: boolean
+        firmware_version:
+          type: string
+          nullable: true
+        wifi_band:
+          type: number
+        wifi_signal:
+          type: integer
+        battery_charge:
+          type: number
+        battery_voltage:
+          type: number
+        charging:
+          type: boolean
+        refresh_rate:
+          type: integer
+        image_cached:
+          type: boolean
+        image_timeout:
+          type: integer
+        wake_reason:
+          type: string
+        wake_duration:
+          type: integer
+        width:
+          type: integer
+        height:
+          type: integer
+        display_compatibility:
+          type: boolean
+        display_profile:
+          type: string
+        touch_bar:
+          type: string
+        sleep_start_at:
+          type: string
+        sleep_stop_at:
+          type: string
+        synced_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    Model:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        label:
+          type: string
+        description:
+          type: string
+          nullable: true
+        kind:
+          type: string
+        mime_type:
+          type: string
+        colors:
+          type: integer
+        bit_depth:
+          type: integer
+        rotation:
+          type: integer
+        offset_x:
+          type: integer
+        offset_y:
+          type: integer
+        scale_factor:
+          type: number
+        css:
+          type: object
+          properties:
+            classes:
+              type: object
+            variables:
+              type: array
+              items:
+                type: array
+                items:
+                  type: string
+        width:
+          type: integer
+        height:
+          type: integer
+        default_palette_id:
+          type: integer
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    Firmware:
+      type: object
+      properties:
+        id:
+          type: integer
+        version:
+          type: string
+        kind:
+          type: string
+        file_name:
+          type: string
+        mime_type:
+          type: string
+        size:
+          type: integer
+        uri:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    Playlist:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        label:
+          type: string
+        current_item_id:
+          type: integer
+          nullable: true
+        mode:
+          type: string
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlaylistItem'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    PlaylistItem:
+      type: object
+      properties:
+        id:
+          type: integer
+        screen_id:
+          type: integer
+        position:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    Screen:
+      type: object
+      properties:
+        id:
+          type: integer
+        model_id:
+          type: integer
+        label:
+          type: string
+        name:
+          type: string
+        content:
+          type: string
+          nullable: true
+        uri:
+          type: string
+          nullable: true
+        preprocessed:
+          type: boolean
+        filename:
+          type: string
+        mime_type:
+          type: string
+        bit_depth:
+          type: integer
+        width:
+          type: integer
+        height:
+          type: integer
+        size:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    LogEntry:
+      type: object
+      properties:
+        id:
+          type: integer
+        message:
+          type: string
+        wifi_status:
+          type: string
+        created_at:
+          type: integer
+        sleep_duration:
+          type: integer
+        refresh_rate:
+          type: integer
+        free_heap_size:
+          type: integer
+        max_alloc_size:
+          type: integer
+        source_path:
+          type: string
+        wake_reason:
+          type: string
+        firmware_version:
+          type: string
+        retry:
+          type: integer
+        battery_voltage:
+          type: number
+        source_line:
+          type: integer
+        special_function:
+          type: string
+        wifi_signal:
+          type: integer
+
+paths:
+  /login:
+    post:
+      summary: Login to acquire JWT token
+      tags:
+        - Authentication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                login:
+                  type: string
+                password:
+                  type: string
+      responses:
+        '200':
+          description: Successful login
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+                  refresh_token:
+                    type: string
+        '401':
+          description: Unauthorized
+        '400':
+          description: Bad Request
+
+  /api/display:
+    get:
+      summary: Get current display content for a device
+      tags:
+        - Firmware
+      security:
+        - deviceMac: []
+      parameters:
+        - in: header
+          name: ID
+          required: true
+          schema:
+            type: string
+          description: Device MAC address
+        - in: header
+          name: BATTERY_VOLTAGE
+          schema:
+            type: number
+        - in: header
+          name: FW_VERSION
+          schema:
+            type: string
+        - in: header
+          name: RSSI
+          schema:
+            type: integer
+        # Other headers can be added as needed based on the list
+      responses:
+        '200':
+          description: Successful response with image URL and settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  filename:
+                    type: string
+                  firmware_url:
+                    type: string
+                    nullable: true
+                  firmware_version:
+                    type: string
+                    nullable: true
+                  image_url:
+                    type: string
+                  image_url_timeout:
+                    type: integer
+                  maximum_compatibility:
+                    type: boolean
+                  refresh_rate:
+                    type: integer
+                  reset_firmware:
+                    type: boolean
+                  special_function:
+                    type: string
+                  temperature_profile:
+                    type: string
+                  touchbar_mode:
+                    type: string
+                  update_firmware:
+                    type: boolean
+
+  /api/log:
+    post:
+      summary: Push device logs to the server
+      tags:
+        - Firmware
+      security:
+        - deviceMac: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                logs:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/LogEntry'
+      responses:
+        '204':
+          description: Logs successfully recorded
+        '401':
+          description: Unauthorized
+
+  /api/setup:
+    get:
+      summary: Provision a new device
+      tags:
+        - Firmware
+      security:
+        - deviceMac: []
+      responses:
+        '200':
+          description: Device provisioned successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  image_url:
+                    type: string
+                  message:
+                    type: string
+
+  /api/devices:
+    get:
+      summary: Get all devices
+      tags:
+        - Server
+      security:
+        - jwt: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Device'
+    post:
+      summary: Create a new device
+      tags:
+        - Server
+      security:
+        - jwt: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                device:
+                  $ref: '#/components/schemas/Device'
+      responses:
+        '201':
+          description: Device created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Device'
+
+  /api/devices/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: integer
+    get:
+      summary: Get a specific device
+      tags:
+        - Server
+      security:
+        - jwt: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Device'
+    patch:
+      summary: Update a specific device
+      tags:
+        - Server
+      security:
+        - jwt: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                device:
+                  $ref: '#/components/schemas/Device'
+      responses:
+        '200':
+          description: Device updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Device'
+    delete:
+      summary: Delete a specific device
+      tags:
+        - Server
+      security:
+        - jwt: []
+      responses:
+        '200':
+          description: Device deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Device'
+
+  /api/models:
+    get:
+      summary: Get all models
+      tags:
+        - Server
+      security:
+        - jwt: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Model'
+    post:
+      summary: Create a new model
+      tags:
+        - Server
+      security:
+        - jwt: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                model:
+                  $ref: '#/components/schemas/Model'
+      responses:
+        '201':
+          description: Model created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Model'
+
+  /api/models/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: integer
+    get:
+      summary: Get a specific model
+      tags:
+        - Server
+      security:
+        - jwt: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Model'
+    patch:
+      # ... similar to other PATCH
+      responses:
+        '200':
+          description: Model updated
+    delete:
+      # ... similar to other DELETE
+      responses:
+        '200':
+          description: Model deleted
+
+  /api/firmware:
+    get:
+      summary: Get all firmware records
+      tags:
+        - Server
+      security:
+        - jwt: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Firmware'
+    post:
+      summary: Create a new firmware record
+      tags:
+        - Server
+      security:
+        - jwt: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                firmware:
+                  $ref: '#/components/schemas/Firmware'
+      responses:
+        '201':
+          description: Firmware created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Firmware'
+
+  /api/playlists:
+    get:
+      summary: Get all playlists
+      tags:
+        - Server
+      security:
+        - jwt: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Playlist'
+    post:
+      summary: Create a new playlist
+      tags:
+        - Server
+      security:
+        - jwt: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                playlist:
+                  $ref: '#/components/schemas/Playlist'
+      responses:
+        '201':
+          description: Playlist created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Playlist'
+
+  /api/screens:
+    get:
+      summary: Get all screens
+      tags:
+        - Server
+      security:
+        - jwt: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Screen'
+    post:
+      summary: Create a new screen
+      tags:
+        - Server
+      security:
+        - jwt: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                screen:
+                  $ref: '#/components/schemas/Screen'
+      responses:
+        '201':
+          description: Screen created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Screen'
