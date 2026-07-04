@@ -50,13 +50,15 @@ The device comes with the TRMNL firmware installed. It's best to update to versi
 
 ## Getting Started
 
-For the setup, TRMNL runs a temporary WIFI access point. Use a phone/tablet/computer to connect to WIFI SSID "TRMNL".
+For the setup, TRMNL device runs a temporary WIFI access point. Use a phone/tablet/computer to connect to WIFI SSID "TRMNL".
 
 On the sign-in page, you can choose your own WIFI SSID and enter the password.
 
 You can choose your own local TRMNL API endpoint (See BYOS), to use your own server.
 
 ## TRMNL
+I implemented a BYOS to serve my own content, running on trmnl.janmg.com, that can be used as custom server.
+
 ```
 pip install -r requirements.txt
 nohup python trmnl.py &
@@ -65,7 +67,9 @@ curl -H "ID: 00:11:22:33:44:55" http://localhost:5000/api/display
 API calls are defined by TRMNL, the /api/setup and /api/display are mandatory with the TRMNL firmware on the device.
 
 ## JANMG
-I, janmg also use /register to tell a device what to show
+
+The devices can 
+janmg also use /register to tell a device what to show
 ```
 https://trmnl.janmg.com/register?mac_address=44:1b:f6:81:9b:fc
 https://trmnl.janmg.com/register?mac_address=e0:72:a1:d8:2e:7c

@@ -10,6 +10,7 @@ app = Flask(__name__)
 DB_PATH = 'trmnl.db'
 CONTENT_DIR = os.path.join(os.path.dirname(__file__), 'content')
 BASE_URL = 'https://trmnl.janmg.com'
+VERSION = "1.0.3" # Increment this to force a global refresh of dynamic content
 
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
@@ -85,8 +86,13 @@ def log_response_info(response):
 @app.route('/api/setup', methods=['GET'])
 def setup():
     # TRMNL API: Device minimal setup response
+    device_id = request.headers.get('ID') or request.headers.get('Id')
+    image_url = f"{BASE_URL}/testcard"
+    if device_id:
+        image_url += f"?mac_address={device_id}"
+        
     response = jsonify({
-        "image_url": f"{BASE_URL}/content/testcard.png",
+        "image_url": image_url,
         "message": "Welcome to your TRMNL device!"
     })
     response.headers['Connection'] = 'close'
@@ -107,8 +113,7 @@ def get_display():
     device_id = request.headers.get('ID') or request.headers.get('Id')
     
     if not device_id:
-        if app.debug:
-            print("ERROR: No ID header found in request")
+        print(f"ERROR: No ID header found in request. Headers: {dict(request.headers)}")
         return jsonify({
             "status": 401,
             "title": "Unauthorized",
@@ -117,6 +122,12 @@ def get_display():
 
     # Normalize MAC address for database lookup
     device_id = device_id.strip().upper()
+    print(f"INFO: get_display for {device_id}")
+
+    # Capture telemetry from headers early
+    battery = request.headers.get('Battery-Voltage', '-')
+    fw = request.headers.get('Fw-Version', '-')
+    ssid = request.headers.get('Wifi-Ssid', '-')
 
     try:
         # Check database for playlist
@@ -138,11 +149,12 @@ def get_display():
             
             if item == "qr-code":
                 reg_url = f"{BASE_URL}/register?mac_address={device_id}"
-                image_url = f"{BASE_URL}/qrcode?data={reg_url}"
+                image_url = f"{BASE_URL}/qrcode?data={reg_url}&v={VERSION}"
                 filename = "register.png"
                 refresh_rate = 60 # Faster refresh while registering
             elif item == "testcard":
-                image_url = f"{BASE_URL}/testcard"
+                # Include telemetry in the URL so ETag changes when status changes
+                image_url = f"{BASE_URL}/testcard?mac_address={device_id}&v={VERSION}&bat={battery}&ssid={ssid}&fw={fw}"
                 filename = "testcard.png"
             else:
                 image_url = f"{BASE_URL}/content/{item}.png"
@@ -173,7 +185,7 @@ def get_display():
             print(f"ERROR: {str(e)}")
         # Catch-all: Display Registration QR
         reg_url = f"{BASE_URL}/register?mac_address={device_id}"
-        image_url = f"{BASE_URL}/qrcode?data={reg_url}"
+        image_url = f"{BASE_URL}/qrcode?data={reg_url}&v={VERSION}"
         filename = "register.png"
         refresh_rate = 60 # Faster refresh while registering
 
@@ -207,10 +219,6 @@ def get_display():
         print(f"SENDING DATA: Returning 200 for {device_id} (New Filename: {filename})")
 
     # Update device info in database
-    battery = request.headers.get('Battery-Voltage', '-')
-    fw = request.headers.get('Fw-Version', '-')
-    ssid = request.headers.get('Wifi-Ssid', '-')
-
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute('''
             UPDATE devices 
@@ -335,12 +343,53 @@ def get_qrcode():
         return "No data provided", 400
     
     buf = generate_qr_code(data)
-    return send_file(buf, mimetype='image/png')
+    resp = make_response(send_file(buf, mimetype='image/png'))
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return resp
 
 @app.route('/testcard')
 def get_testcard():
-    buf = generate_testcard()
-    return send_file(buf, mimetype='image/png')
+    mac_address = request.args.get('mac_address')
+    # If not in args, try to get from headers (like in get_display)
+    if not mac_address:
+        mac_address = request.headers.get('ID') or request.headers.get('Id')
+    
+    device_info = {}
+    if mac_address:
+        mac_address = mac_address.strip().upper()
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT name, battery_voltage, fw_version, wifi_ssid FROM devices WHERE mac_address = ?', (mac_address,))
+                row = cursor.fetchone()
+                if row:
+                    device_info = {
+                        "name": row[0],
+                        "mac": mac_address,
+                        "ip": request.headers.get('X-Real-Ip', request.remote_addr),
+                        "fw": row[2],
+                        "battery": row[1],
+                        "ssid": row[3]
+                    }
+                else:
+                    # New device or not in DB yet, still show some info
+                    device_info = {
+                        "name": "New Device",
+                        "mac": mac_address,
+                        "ip": request.headers.get('X-Real-Ip', request.remote_addr),
+                        "fw": request.headers.get('Fw-Version', '-'),
+                        "battery": request.headers.get('Battery-Voltage', '-'),
+                        "ssid": request.headers.get('Wifi-Ssid', '-')
+                    }
+        except Exception:
+            pass
+
+    print(f"INFO: /testcard request - mac_address: {mac_address}")
+        
+    buf = generate_testcard(mac_address, device_info=device_info)
+    resp = make_response(send_file(buf, mimetype='image/png'))
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return resp
 
 if __name__ == '__main__':
     init_db()
