@@ -59,13 +59,22 @@ You can choose your own local TRMNL API endpoint (See BYOS), to use your own ser
 ## TRMNL
 ```
 pip install -r requirements.txt
-python app.py
+nohup python trmnl.py &
 curl -H "ID: 00:11:22:33:44:55" http://localhost:5000/api/display
 ```
+API calls are defined by TRMNL, the /api/setup and /api/display are mandatory with the TRMNL firmware on the device.
+
+## JANMG
+I, janmg also use /register to tell a device what to show
 ```
 https://trmnl.janmg.com/register?mac_address=44:1b:f6:81:9b:fc
 https://trmnl.janmg.com/register?mac_address=e0:72:a1:d8:2e:7c
 ```
+It can generate a test card, registration qr code or show prepard content (800x480px png with 4 greyscales)
+https://trmnl.janmg.com/testcard
+https://trmnl.janmg.com/qrcode
+https://trmnl.janmg.com/content/eye.png
+https://trmnl.janmg.com/content/schedule.png
 
 ## Ikea frame 13x18 cm
 https://www.ikea.com/fi/en/cat/picture-photo-frames-18746/?filters=f-typed-reference-measurement%3A13x18-frames
