@@ -5,12 +5,13 @@ import time
 from flask import Flask, request, jsonify, send_from_directory, send_file, make_response, render_template_string
 from testcard import generate_testcard
 from qr_code import generate_qr_code
+from schedule import generate_schedule
 
 app = Flask(__name__)
 DB_PATH = 'trmnl.db'
 CONTENT_DIR = os.path.join(os.path.dirname(__file__), 'content')
 BASE_URL = 'https://trmnl.janmg.com'
-VERSION = "1.0.3" # Increment this to force a global refresh of dynamic content
+VERSION = "1.0.4" # Increment this to force a global refresh of dynamic content
 
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
@@ -156,6 +157,9 @@ def get_display():
                 # Include telemetry in the URL so ETag changes when status changes
                 image_url = f"{BASE_URL}/testcard?mac_address={device_id}&v={VERSION}&bat={battery}&ssid={ssid}&fw={fw}"
                 filename = "testcard.png"
+            elif item == "schedule":
+                image_url = f"{BASE_URL}/schedule?mac_address={device_id}&v={VERSION}"
+                filename = "schedule.png"
             else:
                 image_url = f"{BASE_URL}/content/{item}.png"
                 filename = f"{item}.png"
@@ -240,7 +244,7 @@ def register():
     message = ""
     
     # Options from static + content directory
-    options = ["qr-code", "testcard"]
+    options = ["qr-code", "testcard", "schedule"]
     content_files = [f.replace('.png', '') for f in os.listdir(CONTENT_DIR) if f.endswith('.png')]
     for opt in ["schedule", "eye", "robo"]:
         if opt in content_files and opt not in options:
@@ -343,6 +347,14 @@ def get_qrcode():
         return "No data provided", 400
     
     buf = generate_qr_code(data)
+    resp = make_response(send_file(buf, mimetype='image/png'))
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return resp
+
+@app.route('/schedule')
+def get_schedule():
+    # Generate schedule image with weather and events
+    buf = generate_schedule()
     resp = make_response(send_file(buf, mimetype='image/png'))
     resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return resp

@@ -68,8 +68,7 @@ API calls are defined by TRMNL, the /api/setup and /api/display are mandatory wi
 
 ## JANMG
 
-The devices can 
-janmg also use /register to tell a device what to show
+The devices can be configured using a webbrowser where a playlist can be created
 ```
 https://trmnl.janmg.com/register?mac_address=44:1b:f6:81:9b:fc
 https://trmnl.janmg.com/register?mac_address=e0:72:a1:d8:2e:7c
