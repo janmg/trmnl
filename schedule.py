@@ -1,4 +1,7 @@
+# -*- coding: utf-8 -*-
 import io
+import os
+import json
 import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
@@ -67,6 +70,21 @@ def get_weather():
         print(f"Weather error: {e}")
         return None
 
+def get_events():
+    """Load events from events.json."""
+    json_path = os.path.join(os.path.dirname(__file__), 'events.json')
+    try:
+        if os.path.exists(json_path):
+            with open(json_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"Error loading events.json: {e}")
+    
+    # Fallback if file missing or corrupt
+    return [
+        ("No events", "found")
+    ]
+
 def generate_schedule():
     # 800x480 Grayscale
     width, height = 800, 480
@@ -91,9 +109,9 @@ def generate_schedule():
     col_spacing = 20
     col_width = (avail_width - (2 * col_spacing)) // 3
     
-    # Try to load better fonts
-    font_path = "/home/jan/.vscode-server/cli/servers/Stable-93cfdd489c3b228840d0f86ec77c3636277c93ea/server/extensions/markdown-language-features/markdown-editor-out/KaTeX_SansSerif-Regular-2TL3USAE.ttf"
-    font_bold_path = "/home/jan/.vscode-server/cli/servers/Stable-93cfdd489c3b228840d0f86ec77c3636277c93ea/server/extensions/markdown-language-features/markdown-editor-out/KaTeX_SansSerif-Bold-STQ6RXC7.ttf"
+    # EXO2 font by Natanael Gama, through Google Fonts. SIL Open Font License, Version 1.1
+    font_path = "fonts/exo2-medium.ttf"
+    font_bold_path = "fonts/exo2-bold.ttf"
     try:
         font_main = ImageFont.truetype(font_path, 20)
         font_small = ImageFont.truetype(font_path, 16)
@@ -176,19 +194,12 @@ def generate_schedule():
     c2_x1 = c2_x0 + col_width
     draw.rounded_rectangle([c2_x0, margin_top, c2_x1, height - margin_bottom], radius=15, fill=WHITE, outline=BLACK, width=2)
     
-    events = [
-        ("13 jul, 14:45", "kylie"),
-        ("24 jul, 14:45", "visitors"),
-        ("30 jul, 10:00", "linanmäki"),
-        ("7 aug, 12:00", "hairdresser"),
-        ("12 aug, 10:00", "school start"),
-        ("13 aug, 10:15", "dental hygienist")
-    ]
+    events = get_events()
     y = margin_top + 20
     for date, desc in events:
         draw.text((c2_x0 + 15, y), date, font=font_small, fill=DARK_GREY)
         draw.text((c2_x0 + 15, y + 20), desc, font=font_medium_bold, fill=BLACK)
-        y += 100
+        y += 60
 
     # Column 3 - Dark Grey background
     c3_x0 = c2_x1 + col_spacing
@@ -197,7 +208,7 @@ def generate_schedule():
     
     # Fixed text in Column 3 - White text on Dark Grey
     lines = ["HOME", "IS", "WHERE", "YOUR", "WIFI IS"]
-    y = margin_top + 60
+    y = margin_top + 40
     for line in lines:
         # Simple horizontal centering
         try:

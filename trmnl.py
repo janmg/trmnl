@@ -2,16 +2,22 @@ import sqlite3
 import os
 import hashlib
 import time
+import io
+from datetime import datetime
+from PIL import Image
 from flask import Flask, request, jsonify, send_from_directory, send_file, make_response, render_template_string
 from testcard import generate_testcard
 from qr_code import generate_qr_code
-from schedule import generate_schedule
+from schedule import generate_schedule, get_events
+from xkcd import generate_xkcd
+from fmi import generate_fmi
+from titlecard import generate_titlecard
+from register import handle_register
 
 app = Flask(__name__)
 DB_PATH = 'trmnl.db'
 CONTENT_DIR = os.path.join(os.path.dirname(__file__), 'content')
 BASE_URL = 'https://trmnl.janmg.com'
-VERSION = "1.0.4" # Increment this to force a global refresh of dynamic content
 
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
@@ -25,9 +31,27 @@ def init_db():
                 last_filename TEXT,
                 battery_voltage TEXT,
                 fw_version TEXT,
-                wifi_ssid TEXT
+                wifi_ssid TEXT,
+                flip INTEGER DEFAULT 0,
+                custom_url TEXT,
+                custom_text TEXT
             )
         ''')
+        # Ensure 'flip' column exists (for existing databases)
+        try:
+            conn.execute('ALTER TABLE devices ADD COLUMN flip INTEGER DEFAULT 0')
+        except sqlite3.OperationalError:
+            pass # Already exists
+        # Ensure 'custom_url' column exists
+        try:
+            conn.execute('ALTER TABLE devices ADD COLUMN custom_url TEXT')
+        except sqlite3.OperationalError:
+            pass # Already exists
+        # Ensure 'custom_text' column exists
+        try:
+            conn.execute('ALTER TABLE devices ADD COLUMN custom_text TEXT')
+        except sqlite3.OperationalError:
+            pass # Already exists
 
 @app.before_request
 def log_request_info():
@@ -84,13 +108,45 @@ def log_response_info(response):
         
     return response
 
+def apply_rotation(buf, rotate_param):
+    if not rotate_param or rotate_param == '0':
+        return buf
+    
+    try:
+        buf.seek(0)
+        img = Image.open(buf)
+        img = img.transpose(Image.ROTATE_180)
+        new_buf = io.BytesIO()
+        img.save(new_buf, format='PNG')
+        new_buf.seek(0)
+        return new_buf
+    except Exception as e:
+        if app.debug:
+            print(f"ERROR in apply_rotation: {str(e)}")
+        buf.seek(0)
+        return buf
+
 @app.route('/api/setup', methods=['GET'])
 def setup():
     # TRMNL API: Device minimal setup response
     device_id = request.headers.get('ID') or request.headers.get('Id')
     image_url = f"{BASE_URL}/testcard"
+    flip = 0
     if device_id:
+        device_id = device_id.strip().upper()
         image_url += f"?mac_address={device_id}"
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT flip FROM devices WHERE mac_address = ?', (device_id,))
+                row = cursor.fetchone()
+                if row:
+                    flip = row[0] or 0
+        except Exception:
+            pass
+            
+    if flip:
+        image_url += "&flip=1"
         
     response = jsonify({
         "image_url": image_url,
@@ -131,67 +187,112 @@ def get_display():
     ssid = request.headers.get('Wifi-Ssid', '-')
 
     try:
-        # Check database for playlist
+        # Check database for playlist and configuration
         with sqlite3.connect(DB_PATH) as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT playlist, refresh_rate FROM devices WHERE mac_address = ?', (device_id,))
+            cursor.execute('SELECT playlist, refresh_rate, flip, custom_url, custom_text FROM devices WHERE mac_address = ?', (device_id,))
             row = cursor.fetchone()
             
         playlist_items = []
         refresh_rate = 900
-        if row and row[0]:
-            playlist_items = row[0].split(',')
+        flip = 0
+        custom_url = ""
+        custom_text = ""
+        if row:
+            playlist_items = row[0].split(',') if row[0] else []
             refresh_rate = row[1] or 900
+            flip = row[2] or 0
+            custom_url = row[3] or ""
+            custom_text = row[4] or ""
+
+        content_state = ""
 
         if playlist_items:
             # Simple rotation based on current time
             idx = int(time.time() / refresh_rate) % len(playlist_items)
             item = playlist_items[idx]
             
-            if item == "qr-code":
-                reg_url = f"{BASE_URL}/register?mac_address={device_id}"
-                image_url = f"{BASE_URL}/qrcode?data={reg_url}&v={VERSION}"
-                filename = "register.png"
-                refresh_rate = 60 # Faster refresh while registering
-            elif item == "testcard":
-                # Include telemetry in the URL so ETag changes when status changes
-                image_url = f"{BASE_URL}/testcard?mac_address={device_id}&v={VERSION}&bat={battery}&ssid={ssid}&fw={fw}"
+            if item == "testcard":
+                image_url = f"{BASE_URL}/testcard?mac_address={device_id}"
                 filename = "testcard.png"
+                refresh_rate = 60 # Faster refresh while registering
+                # For testcard, content changes if hardware info changes
+                content_state = f"{battery}-{fw}-{ssid}-{request.remote_addr}"
             elif item == "schedule":
-                image_url = f"{BASE_URL}/schedule?mac_address={device_id}&v={VERSION}"
+                image_url = f"{BASE_URL}/schedule?mac_address={device_id}"
                 filename = "schedule.png"
+                # Schedule changes if events change, or if weather might have updated (every hour)
+                events_hash = hashlib.md5(str(get_events()).encode('utf-8')).hexdigest()
+                content_state = f"{events_hash}-{time.strftime('%Y-%m-%d-%H')}"
+            elif item == "xkcd":
+                image_url = f"{BASE_URL}/xkcd?mac_address={device_id}"
+                filename = "xkcd.png"
+                # XKCD changes once a day usually, content_state with hour is safe
+                content_state = f"xkcd-{time.strftime('%Y-%m-%d-%H')}"
+            elif item == "fmi":
+                image_url = f"{BASE_URL}/fmi?mac_address={device_id}"
+                filename = "fmi.png"
+                # FMI updates every 15 mins, using 15-min bucket for content state
+                minute_bucket = (datetime.now().minute // 15) * 15
+                content_state = f"fmi-{datetime.now().strftime('%Y%m%d%H')}{minute_bucket}"
+            elif item == "custom_url" and custom_url:
+                image_url = custom_url
+                filename = "custom_url.png"
+                # For external URLs, we don't know when they change, so we refresh periodically
+                content_state = f"custom-{time.strftime('%Y-%m-%d-%H')}"
+            elif item == "custom_text" and custom_text:
+                image_url = f"{BASE_URL}/text?mac_address={device_id}"
+                filename = "titlecard.png"
+                # Text changes if content changes
+                text_hash = hashlib.md5(custom_text.encode('utf-8')).hexdigest()
+                content_state = f"text-{text_hash}"
             else:
                 image_url = f"{BASE_URL}/content/{item}.png"
                 filename = f"{item}.png"
+                # For static files, use mtime as content state
+                try:
+                    mtime = os.path.getmtime(os.path.join(CONTENT_DIR, f"{item}.png"))
+                    content_state = f"{mtime}"
+                except:
+                    pass
                 
+            if flip:
+                separator = "&" if "?" in image_url else "?"
+                image_url += f"{separator}flip=1"
+
             if app.debug:
-                print(f"PLAYLIST MATCH: Displaying {item} for {device_id}")
+                print(f"PLAYLIST MATCH: Displaying {item} for {device_id} (flip: {flip})")
         else:
             # Fallback to registration/check logic if no playlist
-            row_name = row[0] if row else None # name is first col in old schema, but we changed it.
-            # Let's re-fetch name explicitly if row is just playlist/refresh
             with sqlite3.connect(DB_PATH) as conn:
                 cursor = conn.cursor()
-                cursor.execute('SELECT name FROM devices WHERE mac_address = ?', (device_id,))
+                cursor.execute('SELECT name, flip FROM devices WHERE mac_address = ?', (device_id,))
                 n_row = cursor.fetchone()
                 row_name = n_row[0] if n_row else None
+                flip = n_row[1] if n_row else 0
 
             if row_name:
                 if app.debug:
                     print(f"MATCH FOUND: Displaying schedule.png for {device_id} ({row_name})")
                 image_url = f"{BASE_URL}/content/schedule.png"
+                if flip:
+                    image_url += "?flip=1"
                 filename = "schedule.png"
+                # For fallback schedule, update if events change or every hour for weather
+                events_hash = hashlib.md5(str(get_events()).encode('utf-8')).hexdigest()
+                content_state = f"fallback-{events_hash}-{time.strftime('%Y-%m-%d-%H')}"
             else:
                 raise Exception("Device not found/not configured")
 
     except Exception as e:
         if app.debug:
             print(f"ERROR: {str(e)}")
-        # Catch-all: Display Registration QR
-        reg_url = f"{BASE_URL}/register?mac_address={device_id}"
-        image_url = f"{BASE_URL}/qrcode?data={reg_url}&v={VERSION}"
-        filename = "register.png"
+        # Catch-all: Display Testcard for unknown devices
+        image_url = f"{BASE_URL}/testcard?mac_address={device_id}"
+        filename = "testcard.png"
         refresh_rate = 60 # Faster refresh while registering
+        content_state = "unknown-device"
+        flip = 0
 
     response_data = {
         "filename": filename,
@@ -208,9 +309,10 @@ def get_display():
         "update_firmware": False
     }
 
-    # Generate ETag based on the response content
-    # This ensures that if filename and image_url are the same, we can return 304
-    etag_content = f"{filename}-{image_url}"
+    # Generate ETag based on the response content and additional change factors
+    # day_string ensures at least one refresh per day
+    day_string = time.strftime('%Y-%m-%d')
+    etag_content = f"{filename}-{image_url}-{day_string}-{content_state}-{flip}"
     etag = hashlib.md5(etag_content.encode('utf-8')).hexdigest()
 
     # Check if the device already has this version
@@ -236,117 +338,34 @@ def get_display():
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
-    mac_address = request.args.get('mac_address') or request.form.get('mac_address')
-    if not mac_address:
-        return "MAC Address required", 400
-    
-    mac_address = mac_address.upper()
-    message = ""
-    
-    # Options from static + content directory
-    options = ["qr-code", "testcard", "schedule"]
-    content_files = [f.replace('.png', '') for f in os.listdir(CONTENT_DIR) if f.endswith('.png')]
-    for opt in ["schedule", "eye", "robo"]:
-        if opt in content_files and opt not in options:
-            options.append(opt)
-    
-    for f in content_files:
-        if f not in options:
-            options.append(f)
-
-    refresh_options = [1, 5, 15, 60, 1440]
-
-    if request.method == 'POST':
-        selected_items = request.form.getlist('playlist')
-        name = request.form.get('name')
-        refresh_min = int(request.form.get('refresh_rate', 15))
-        refresh_sec = refresh_min * 60
-        playlist_str = ",".join(selected_items)
-        
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute('''
-                INSERT INTO devices (mac_address, name, playlist, refresh_rate) 
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(mac_address) DO UPDATE SET 
-                name=excluded.name, playlist=excluded.playlist, refresh_rate=excluded.refresh_rate
-            ''', (mac_address, name or f"Device {mac_address[-5:]}", playlist_str, refresh_sec))
-        
-        message = f"Device {mac_address} updated! Selected items: {', '.join(selected_items)}"
-
-    # GET request or after POST: show form
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT name, playlist, refresh_rate, last_update, last_filename, battery_voltage, fw_version, wifi_ssid FROM devices WHERE mac_address = ?', (mac_address,))
-        row = cursor.fetchone()
-        if row:
-            device_name = row[0]
-            current_playlist = row[1].split(',') if row[1] else []
-            current_refresh_min = (row[2] or 900) // 60
-            last_update = row[3] or "Never"
-            last_filename = row[4] or "None"
-            battery = row[5] or "-"
-            fw_version = row[6] or "-"
-            wifi_ssid = row[7] or "-"
-        else:
-            device_name = f"Device {mac_address[-5:]}"
-            current_playlist = []
-            current_refresh_min = 15
-            last_update = "Never"
-            last_filename = "None"
-            battery = "-"
-            fw_version = "-"
-            wifi_ssid = "-"
-
-    html = '''
-    <h1>Register / Configure Device</h1>
-    <p><strong>Last Update:</strong> {{ last_update }} ({{ last_filename }})</p>
-    <p><strong>Status:</strong> Battery: {{ battery }}V | Firmware: {{ fw_version }} | WiFi: {{ wifi_ssid }}</p>
-    <form method="post">
-        <input type="hidden" name="mac_address" value="{{ mac_address }}">
-        <p>MAC Address: {{ mac_address }}</p>
-        <p>Name: <input type="text" name="name" value="{{ device_name }}"></p>
-        <p>Refresh Rate: 
-            <select name="refresh_rate">
-                {% for min in refresh_options %}
-                <option value="{{ min }}" {% if min == current_refresh_min %}selected{% endif %}>{{ min }} minutes</option>
-                {% endfor %}
-            </select>
-        </p>
-        <p>Playlist items:</p>
-        {% for option in options %}
-        <div>
-            <input type="checkbox" id="{{ option }}" name="playlist" value="{{ option }}"
-                   {% if option in current_playlist %}checked{% endif %}>
-            <label for="{{ option }}">{{ option }}</label>
-        </div>
-        {% endfor %}
-        <br>
-        <button type="submit">Save Configuration</button>
-    </form>
-    {% if message %}
-    <hr>
-    <p><strong>{{ message }}</strong></p>
-    {% endif %}
-    '''
-    return render_template_string(html, mac_address=mac_address, device_name=device_name, 
-                                  options=options, current_playlist=current_playlist,
-                                  refresh_options=refresh_options, current_refresh_min=current_refresh_min,
-                                  message=message, last_update=last_update, last_filename=last_filename,
-                                  battery=battery, fw_version=fw_version, wifi_ssid=wifi_ssid)
+    return handle_register(DB_PATH, CONTENT_DIR)
 
 @app.route('/content/<path:filename>')
 def serve_content(filename):
     # Show the files in the content directory
+    filepath = os.path.join(CONTENT_DIR, filename)
+    if not os.path.exists(filepath):
+        return "File not found", 404
+    
+    flip = request.args.get('flip')
+    if flip == '1':
+        with open(filepath, 'rb') as f:
+            buf = io.BytesIO(f.read())
+        buf = apply_rotation(buf, flip)
+        return send_file(buf, mimetype='image/png')
+        
     return send_from_directory(CONTENT_DIR, filename)
 
 @app.route('/qrcode')
 def get_qrcode():
     # Write a QR code to the screen to register the device in the sqlite database
     data = request.args.get('data')
+    flip = request.args.get('flip')
     if not data:
         return "No data provided", 400
     
     buf = generate_qr_code(data)
+    buf = apply_rotation(buf, flip)
     resp = make_response(send_file(buf, mimetype='image/png'))
     resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return resp
@@ -354,7 +373,9 @@ def get_qrcode():
 @app.route('/schedule')
 def get_schedule():
     # Generate schedule image with weather and events
+    flip = request.args.get('flip')
     buf = generate_schedule()
+    buf = apply_rotation(buf, flip)
     resp = make_response(send_file(buf, mimetype='image/png'))
     resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return resp
@@ -362,6 +383,7 @@ def get_schedule():
 @app.route('/testcard')
 def get_testcard():
     mac_address = request.args.get('mac_address')
+    flip = request.args.get('flip')
     # If not in args, try to get from headers (like in get_display)
     if not mac_address:
         mac_address = request.headers.get('ID') or request.headers.get('Id')
@@ -372,9 +394,11 @@ def get_testcard():
         try:
             with sqlite3.connect(DB_PATH) as conn:
                 cursor = conn.cursor()
-                cursor.execute('SELECT name, battery_voltage, fw_version, wifi_ssid FROM devices WHERE mac_address = ?', (mac_address,))
+                cursor.execute('SELECT name, battery_voltage, fw_version, wifi_ssid, flip FROM devices WHERE mac_address = ?', (mac_address,))
                 row = cursor.fetchone()
                 if row:
+                    if flip is None:
+                        flip = row[4]
                     device_info = {
                         "name": row[0],
                         "mac": mac_address,
@@ -399,6 +423,56 @@ def get_testcard():
     print(f"INFO: /testcard request - mac_address: {mac_address}")
         
     buf = generate_testcard(mac_address, device_info=device_info)
+    buf = apply_rotation(buf, flip)
+    resp = make_response(send_file(buf, mimetype='image/png'))
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return resp
+
+@app.route('/xkcd')
+def get_xkcd():
+    flip = request.args.get('flip')
+    buf = generate_xkcd()
+    if not buf:
+        return "Failed to fetch xkcd", 500
+    buf = apply_rotation(buf, flip)
+    resp = make_response(send_file(buf, mimetype='image/png'))
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return resp
+
+@app.route('/fmi')
+def get_fmi():
+    flip = request.args.get('flip')
+    buf = generate_fmi()
+    if not buf:
+        return "Failed to fetch FMI radar", 500
+    buf = apply_rotation(buf, flip)
+    resp = make_response(send_file(buf, mimetype='image/png'))
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return resp
+
+@app.route('/text')
+def get_text():
+    mac_address = request.args.get('mac_address') or request.headers.get('ID') or request.headers.get('Id')
+    flip = request.args.get('flip')
+    text = "Silent Movie Title"
+    
+    if mac_address:
+        mac_address = mac_address.strip().upper()
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT custom_text FROM devices WHERE mac_address = ?', (mac_address,))
+            row = cursor.fetchone()
+            if row and row[0]:
+                text = row[0]
+                if app.debug:
+                    print(f"DEBUG: Found text for {mac_address}: {text}")
+            elif app.debug:
+                print(f"DEBUG: No text found for {mac_address}, using default")
+    elif app.debug:
+        print("DEBUG: No MAC address provided to /text")
+                
+    buf = generate_titlecard(text)
+    buf = apply_rotation(buf, flip)
     resp = make_response(send_file(buf, mimetype='image/png'))
     resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return resp

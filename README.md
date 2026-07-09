@@ -132,6 +132,44 @@ If the device pulls that JSON, it is instructed to download the `output.png` ...
 magick input.jpeg -resize "800x480^" -gravity center -extent 800x480 -colorspace gray -dither FloydSteinberg -posterize 4 -define png:bit-depth=2 -define png:color-type=0 output.png
 ```
 
+```
+--- REQUEST ---
+Method: GET
+Path:   /api/setup
+Headers: {'Host': 'trmnl.janmg.com', 'X-Real-Ip': '10.0.0.230', 'X-Forwarded-For': '10.0.0.230', 'X-Forwarded-Proto': 'https', 'User-Agent': 'ESP32HTTPClient', 'Accept-Encoding': 'identity;q=1,chunked;q=0.1,*;q=0', 'Id': '44:1B:F6:81:9B:FC', 'Content-Type': 'application/json', 'Fw-Version': '1.8.6', 'Model': 'xiao_epaper_display'}
+--- RESPONSE ---
+Status: 200 OK
+Body:    {
+  "image_url": "https://trmnl.janmg.com/content/test-schedule.png",
+  "message": "Welcome to your TRMNL device!"
+}
+```
+```
+--- REQUEST ---
+Method: GET
+Path:   /api/display
+Headers: {'Host': 'trmnl.janmg.com', 'X-Real-Ip': '10.0.0.230', 'X-Forwarded-For': '10.0.0.230', 'X-Forwarded-Proto': 'https', 'User-Agent': 'ESP32HTTPClient', 'Accept-Encoding': 'identity;q=1,chunked;q=0.1,*;q=0', 'Id': '44:1B:F6:81:9B:FC', 'Content-Type': 'application/json', 'Update-Source': 'timer', 'Access-Token': '', 'Refresh-Rate': '900', 'Battery-Voltage': '4.20', 'Fw-Version': '1.8.6', 'Model': 'xiao_epaper_display', 'Image-Cached': 'true', 'Wake-Time': '4683', 'Rssi': '-69', 'Wifi-Band': '2.4', 'Wifi-Ssid': 'mywifi', 'Temperature-Profile': 'true', 'Width': '800', 'Height': '480'}127.0.0.1 - - [04/Jul/2026 06:48:31] "GET /api/display HTTP/1.1" 200 -
+
+MATCH FOUND: Displaying schedule.png for 44:1B:F6:81:9B:FC (Device 9B:FC)
+SENDING DATA: Returning 200 for 44:1B:F6:81:9B:FC (New Filename: schedule.png)
+--- RESPONSE ---
+Status: 200 OK
+Body:    {
+  "filename": "schedule.png",
+  "firmware_url": null,
+  "firmware_version": null,
+  "image_url": "https://trmnl.janmg.com/content/test-schedule.png",
+  "image_url_timeout": 0,
+  "maximum_compatibility": false,
+  "refresh_rate": 900,
+  "reset_firmware": false,
+  "special_function": "none",
+  "temperature_profile": "default",
+  "touchbar_mode": "tap",
+  "update_firmware": false
+}
+```
+
 ## TRMNL Cloud
 
 If you don't want to run your own BYOS, you can buy access to their service for 45 Euro.
