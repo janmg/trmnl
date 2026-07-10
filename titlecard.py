@@ -9,18 +9,19 @@ def generate_titlecard(text):
     # Try to load the background image from content/titlecard.png
     bg_path = os.path.join(os.path.dirname(__file__), 'content', 'titlecard.png')
     if os.path.exists(bg_path):
-        img = Image.open(bg_path).convert('RGB')
-        # If it's not the right size, resize it (or center it on black)
+        # Convert to 'L' (Grayscale) immediately so drawing white (255) works correctly
+        img = Image.open(bg_path).convert('L')
+        # If it's not the right size, resize it
         if img.size != (width, height):
             img = img.resize((width, height))
     else:
         # Create a black background if the image doesn't exist
-        img = Image.new('RGB', (width, height), (0, 0, 0))
+        img = Image.new('L', (width, height), 0)
 
     draw = ImageDraw.Draw(img)
     
-    # Border color
-    border_color = (255, 255, 255) # Pure white
+    # Border color (Grayscale white)
+    border_color = 255 
     
     # Helper to keep draw_ornate_corner available but we're using the image now
     def draw_ornate_corner(cx, cy, quadrant):
@@ -122,11 +123,7 @@ def generate_titlecard(text):
             draw.text((x, current_y), line_text, font=font, fill=255)
         current_y += line_h + line_spacing
 
-    # Convert to grayscale
-    img = img.convert('L')
-    
-    # We remove posterize/autocontrast to ensure 255 stays 255.
-    # The TRMNL device will handle its own dithering/quantization if needed,
+    # The TRMNL device handles its own dithering/quantization,
     # but sending a 255 white is the safest way to ensure "bright white".
     
     buf = io.BytesIO()

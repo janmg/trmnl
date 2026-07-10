@@ -74,10 +74,24 @@ https://trmnl.janmg.com/register?mac_address=44:1b:f6:81:9b:fc
 https://trmnl.janmg.com/register?mac_address=e0:72:a1:d8:2e:7c
 ```
 It can generate a test card, registration qr code or show prepard content (800x480px png with 4 greyscales)
+
+## Generated Content
 https://trmnl.janmg.com/testcard
-https://trmnl.janmg.com/qrcode
+https://trmnl.janmg.com/schedule
+https://trmnl.janmg.com/xkcd
+https://trmnl.janmg.com/fmi
+
+## Images
+https://trmnl.janmg.com/content/lauttasaari.png
+https://trmnl.janmg.com/content/titlecard.png
 https://trmnl.janmg.com/content/eye.png
-https://trmnl.janmg.com/content/schedule.png
+https://trmnl.janmg.com/content/robo.png
+https://trmnl.janmg.com/content/sandels.png
+https://trmnl.janmg.com/content/test-schedule.png
+https://trmnl.janmg.com/content/test-testcard.png
+
+https://trmnl-public.s3.us-east-2.amazonaws.com/sw7ldchyw50ge0bg2zzzl5fzqlvl
+
 
 ## Ikea frame 13x18 cm
 https://www.ikea.com/fi/en/cat/picture-photo-frames-18746/?filters=f-typed-reference-measurement%3A13x18-frames
@@ -92,6 +106,8 @@ Picture with mount, width: 10 cm
 Picture without mount, height: 18 cm
 Picture without mount, width: 13 cm
 Frame, depth: 3 cm
+
+
 
 ## TRMNL BYOS
 

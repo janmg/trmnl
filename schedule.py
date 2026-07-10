@@ -70,8 +70,18 @@ def get_weather():
         print(f"Weather error: {e}")
         return None
 
-def get_events():
-    """Load events from events.json."""
+def get_events(is_generic=False):
+    """Load events from events.json or return generic fallback."""
+    if is_generic:
+        return [
+            ["1 oct, 12:00", "Miina Sillanpää Day"],
+            ["10 oct, 12:00", "Aleksis Kivi"],
+            ["24 October", "United Nations Day"],
+            ["6 Nov, 12:00", "Swedish Heritage Day"],
+            ["20 Nov, 12:00", "Children's Rights"],
+            ["8 Dec, 12:00", "Jean Sibelius"]
+        ]
+
     json_path = os.path.join(os.path.dirname(__file__), 'events.json')
     try:
         if os.path.exists(json_path):
@@ -80,12 +90,9 @@ def get_events():
     except Exception as e:
         print(f"Error loading events.json: {e}")
     
-    # Fallback if file missing or corrupt
-    return [
-        ("No events", "found")
-    ]
+    return [["No events", "found"]]
 
-def generate_schedule():
+def generate_schedule(is_generic=False):
     # 800x480 Grayscale
     width, height = 800, 480
     # 4 tones: black, dark grey, light grey, white
@@ -194,7 +201,7 @@ def generate_schedule():
     c2_x1 = c2_x0 + col_width
     draw.rounded_rectangle([c2_x0, margin_top, c2_x1, height - margin_bottom], radius=15, fill=WHITE, outline=BLACK, width=2)
     
-    events = get_events()
+    events = get_events(is_generic)
     y = margin_top + 20
     for date, desc in events:
         draw.text((c2_x0 + 15, y), date, font=font_small, fill=DARK_GREY)

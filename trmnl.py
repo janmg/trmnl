@@ -373,8 +373,21 @@ def get_qrcode():
 @app.route('/schedule')
 def get_schedule():
     # Generate schedule image with weather and events
+    mac_address = request.args.get('mac_address') or request.headers.get('ID') or request.headers.get('Id')
     flip = request.args.get('flip')
-    buf = generate_schedule()
+    
+    # If no mac_address is provided, we use the generic/default schedule
+    is_generic = True
+    if mac_address:
+        mac_address = mac_address.strip().upper()
+        # Check if the device is known to us
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT 1 FROM devices WHERE mac_address = ?', (mac_address,))
+            if cursor.fetchone():
+                is_generic = False
+                
+    buf = generate_schedule(is_generic=is_generic)
     buf = apply_rotation(buf, flip)
     resp = make_response(send_file(buf, mimetype='image/png'))
     resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
