@@ -46,10 +46,10 @@ def generate_fmi():
         new_size = int(500 * scale) # ~1166
         zoomed_img = img.resize((new_size, new_size), Image.Resampling.LANCZOS)
         
-        # Crop the bottom-left 700x450 from this zoomed image, but move 300px higher
-        # Bottom was: new_size. New bottom: new_size - 300
+        # Crop the bottom-left 700x450 from this zoomed image, but move 200px higher
+        # (Was 300px higher, moving 100px lower means new_size - 200)
         left = 0
-        bottom = new_size - 300
+        bottom = new_size - 200
         right = 700
         top = bottom - 450
         cropped = zoomed_img.crop((left, top, right, bottom))

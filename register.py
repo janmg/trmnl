@@ -11,7 +11,7 @@ def handle_register(db_path, content_dir):
     message = ""
     
     # Options from static + content directory
-    generated_options = ["testcard", "schedule", "xkcd", "fmi"]
+    generated_options = ["testcard", "schedule", "xkcd", "fmi", "clock"]
     content_options = sorted([f.replace('.png', '') for f in os.listdir(content_dir) if f.endswith('.png')])
     content_options = [f for f in content_options if f not in generated_options]
 

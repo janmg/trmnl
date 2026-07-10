@@ -3,7 +3,7 @@ import os
 import hashlib
 import time
 import io
-from datetime import datetime
+from datetime import datetime, timezone
 from PIL import Image
 from flask import Flask, request, jsonify, send_from_directory, send_file, make_response, render_template_string
 from testcard import generate_testcard
@@ -12,6 +12,7 @@ from schedule import generate_schedule, get_events
 from xkcd import generate_xkcd
 from fmi import generate_fmi
 from titlecard import generate_titlecard
+from clock import generate_clock
 from register import handle_register
 
 app = Flask(__name__)
@@ -166,11 +167,16 @@ def log():
 
 @app.route('/api/display', methods=['GET'])
 def get_display():
+    # Standard GET parameters
+    mac_address = request.args.get('mac_address')
+    flip = request.args.get('flip')
+    
     # TRMNL API: devices send the MAC address in the 'ID' (or 'Id') header
-    device_id = request.headers.get('ID') or request.headers.get('Id')
+    # Fallback to mac_address param for browser testing
+    device_id = request.headers.get('ID') or request.headers.get('Id') or mac_address
     
     if not device_id:
-        print(f"ERROR: No ID header found in request. Headers: {dict(request.headers)}")
+        print(f"ERROR: No ID header or mac_address found in request. Headers: {dict(request.headers)}")
         return jsonify({
             "status": 401,
             "title": "Unauthorized",
@@ -179,7 +185,8 @@ def get_display():
 
     # Normalize MAC address for database lookup
     device_id = device_id.strip().upper()
-    print(f"INFO: get_display for {device_id}")
+    if app.debug:
+        print(f"INFO: get_display for {device_id}")
 
     # Capture telemetry from headers early
     battery = request.headers.get('Battery-Voltage', '-')
@@ -204,6 +211,11 @@ def get_display():
             flip = row[2] or 0
             custom_url = row[3] or ""
             custom_text = row[4] or ""
+            if app.debug:
+                print(f"DEBUG: Found {device_id} in DB. Playlist: {playlist_items}")
+        else:
+            if app.debug:
+                print(f"DEBUG: Device {device_id} NOT found in DB")
 
         content_state = ""
 
@@ -211,6 +223,8 @@ def get_display():
             # Simple rotation based on current time
             idx = int(time.time() / refresh_rate) % len(playlist_items)
             item = playlist_items[idx]
+            if app.debug:
+                print(f"DEBUG: Selected item '{item}' from playlist at index {idx}")
             
             if item == "testcard":
                 image_url = f"{BASE_URL}/testcard?mac_address={device_id}"
@@ -235,6 +249,12 @@ def get_display():
                 # FMI updates every 15 mins, using 15-min bucket for content state
                 minute_bucket = (datetime.now().minute // 15) * 15
                 content_state = f"fmi-{datetime.now().strftime('%Y%m%d%H')}{minute_bucket}"
+            elif item == "clock":
+                image_url = f"{BASE_URL}/clock?mac_address={device_id}"
+                filename = "clock.png"
+                # Clock changes every minute. 
+                # Using UTC for content state to keep hash generation consistent
+                content_state = f"clock-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M')}"
             elif item == "custom_url" and custom_url:
                 image_url = custom_url
                 filename = "custom_url.png"
@@ -458,6 +478,15 @@ def get_fmi():
     buf = generate_fmi()
     if not buf:
         return "Failed to fetch FMI radar", 500
+    buf = apply_rotation(buf, flip)
+    resp = make_response(send_file(buf, mimetype='image/png'))
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return resp
+
+@app.route('/clock')
+def get_clock():
+    flip = request.args.get('flip')
+    buf = generate_clock()
     buf = apply_rotation(buf, flip)
     resp = make_response(send_file(buf, mimetype='image/png'))
     resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'

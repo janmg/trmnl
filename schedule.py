@@ -29,7 +29,9 @@ def get_weather():
         current_temp = None
         
         now = datetime.now(timezone.utc)
-        # We want data for "today" in local time (Helsinki is UTC+3 in July)
+        # EET/EEST Offset (Helsinki). Currently UTC+3 for July.
+        local_now = now + timedelta(hours=3)
+        # We want data for "today" in local time
         # Let's just look at the next 18 hours of forecast to represent "today"
         end_period = now + timedelta(hours=18)
         

@@ -107,7 +107,8 @@ Picture without mount, height: 18 cm
 Picture without mount, width: 13 cm
 Frame, depth: 3 cm
 
-
+## TODO
+implement better margins tracking to scale images to fit in the frame
 
 ## TRMNL BYOS
 
