@@ -1,6 +1,9 @@
 import io
+import os
 import qrcode
 from PIL import Image, ImageDraw, ImageFont
+
+BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 
 def generate_testcard(mac_address=None, device_info=None):
     # 800x480 Grayscale TV Test Card
@@ -8,17 +11,20 @@ def generate_testcard(mac_address=None, device_info=None):
     canvas = Image.new('L', (width, height), 255) # White background
     draw = ImageDraw.Draw(canvas)
     
-    # Grid lines (Light Grey) for full screen alignment
-    grid_size = 40
-    for x in range(0, width, grid_size):
-        draw.line([(x, 0), (x, height)], fill=230)
-    for y in range(0, height, grid_size):
-        draw.line([(0, y), (width, y)], fill=230)
-
     try:
         font = ImageFont.load_default()
     except Exception:
         font = None
+
+    try:
+        info_font = ImageFont.truetype(os.path.join(BASE_DIR, "fonts", "exo2-medium.ttf"), 16)
+    except Exception:
+        info_font = font
+
+    try:
+        compass_font = ImageFont.truetype(os.path.join(BASE_DIR, "fonts", "exo2-bold.ttf"), 30)
+    except Exception:
+        compass_font = font
 
     # 4 tones: black, dark grey, light grey, white
     BLACK = 0
@@ -64,9 +70,9 @@ def generate_testcard(mac_address=None, device_info=None):
         if is_major:
             draw.text((width - 1 - length - 30, y - 5), str(y), font=font, fill=BLACK)
 
-    # Center Circle
-    cx, cy = width // 2, height // 2
-    radius = 150
+    # Circle shifted right with explicit vertical bounds: top=120px, bottom=390px.
+    cx, cy = (width // 2) + 170, 255
+    radius = 135
     draw.ellipse([cx - radius, cy - radius, cx + radius, cy + radius], outline=BLACK, width=2)
 
     # If Mac Address provided, add a small QR code in the middle
@@ -75,11 +81,13 @@ def generate_testcard(mac_address=None, device_info=None):
         reg_url = f"{base_url}/configure?mac_address={mac_address}"
         
         try:
-            qr = qrcode.QRCode(version=1, box_size=4, border=2)
+            qr = qrcode.QRCode(version=1, box_size=4, border=0)
             qr.add_data(reg_url)
             qr.make(fit=True)
             qr_img = qr.make_image(fill_color="black", back_color="white").convert('L')
-            
+
+            qr_w, qr_h = qr_img.size
+            qr_img = qr_img.resize((qr_w + 30, qr_h + 30), Image.Resampling.NEAREST)
             qr_w, qr_h = qr_img.size
             # Center inside the circle
             canvas.paste(qr_img, (cx - qr_w // 2, cy - qr_h // 2))
@@ -90,44 +98,83 @@ def generate_testcard(mac_address=None, device_info=None):
     # Device Info Column (Left Side)
     if device_info:
         info_x = 110
-        info_y = cy - 60
+        info_y = cy - 110
         spacing = 15
-        draw.text((info_x, info_y), f"NAME: {device_info.get('name', '-')}", font=font, fill=BLACK)
-        draw.text((info_x, info_y + spacing), f"MAC:  {device_info.get('mac', '-')}", font=font, fill=BLACK)
-        draw.text((info_x, info_y + spacing*2), f"IP:   {device_info.get('ip', '-')}", font=font, fill=BLACK)
-        draw.text((info_x, info_y + spacing*3), f"FW:   {device_info.get('fw', '-')}", font=font, fill=BLACK)
-        draw.text((info_x, info_y + spacing*4), f"BAT:  {device_info.get('battery', '-')}V", font=font, fill=BLACK)
-        draw.text((info_x, info_y + spacing*5), f"SSID: {device_info.get('ssid', '-')}", font=font, fill=BLACK)
+        draw.text((info_x, info_y), f"NAME: {device_info.get('name', '-')}" , font=info_font, fill=BLACK)
+        draw.text((info_x, info_y + spacing), f"MAC:  {device_info.get('mac', '-')}" , font=info_font, fill=BLACK)
+        draw.text((info_x, info_y + spacing*2), f"IP:   {device_info.get('ip', '-')}" , font=info_font, fill=BLACK)
+        draw.text((info_x, info_y + spacing*3), f"FW:   {device_info.get('fw', '-')}" , font=info_font, fill=BLACK)
+        draw.text((info_x, info_y + spacing*4), f"BAT:  {device_info.get('battery', '-')}V" , font=info_font, fill=BLACK)
+        draw.text((info_x, info_y + spacing*5), f"SSID: {device_info.get('ssid', '-')}" , font=info_font, fill=BLACK)
 
     # Compass Headings
-    draw.text((cx - 5, cy - radius + 10), "N", font=font, fill=BLACK)
-    draw.text((cx - 5, cy + radius - 25), "S", font=font, fill=BLACK)
-    draw.text((cx + radius - 20, cy - 5), "E", font=font, fill=BLACK)
-    draw.text((cx - radius + 10, cy - 5), "W", font=font, fill=BLACK)
+    draw.text((cx - 10, cy - radius + 8), "N", font=compass_font, fill=BLACK)
+    draw.text((cx - 10, cy + radius - 32), "S", font=compass_font, fill=BLACK)
+    draw.text((cx + radius - 28, cy - 12), "E", font=compass_font, fill=BLACK)
+    draw.text((cx - radius + 8, cy - 12), "W", font=compass_font, fill=BLACK)
 
-    # Right side: block with dithering from light to dark
-    dither_w, dither_h = 60, 200
-    dx0, dy0 = cx + radius + 15, cy - (dither_h // 2)
-    bayer = [[0, 2], [3, 1]]
-    for dy in range(dither_h):
-        brightness = (dither_h - dy) / dither_h  # Top is white (1.0), bottom is black (0.0)
-        val_scaled = brightness * 3
-        base_level = int(val_scaled)
-        fraction = val_scaled - base_level
-        for dx in range(dither_w):
-            threshold = bayer[dy % 2][dx % 2] / 4.0
-            level_idx = min(3, base_level + 1) if fraction > threshold else base_level
-            p_val = [0, 85, 170, 255][level_idx]
-            canvas.putpixel((dx0 + dx, dy0 + dy), p_val)
+    # Horizontal gray bars under the information box
+    bars_x = 110
+    bars_y = (cy - 60) + (15 * 6) + 15
+    grad_w, grad_h = 260, 34
 
-    # Right side: 4 solid color blocks (moved next to dithering)
-    block_w, block_h = 40, 50
+    # Floyd-Steinberg dithered gradient box (white -> black), above the 4-color bars
+    fs_x = bars_x
+    fs_y = bars_y - grad_h - 12
+    fs_img = Image.new('L', (grad_w, grad_h), WHITE)
+
+    # Start with smooth grayscale gradient
+    for fy in range(grad_h):
+        for fx in range(grad_w):
+            v = int(255 - (fx / max(1, grad_w - 1)) * 255)
+            fs_img.putpixel((fx, fy), v)
+
+    # Floyd-Steinberg dithering to black/white
+    for fy in range(grad_h):
+        for fx in range(grad_w):
+            old = fs_img.getpixel((fx, fy))
+            new = WHITE if old >= 128 else BLACK
+            fs_img.putpixel((fx, fy), new)
+            err = old - new
+
+            if fx + 1 < grad_w:
+                n = fs_img.getpixel((fx + 1, fy)) + int(err * 7 / 16)
+                fs_img.putpixel((fx + 1, fy), max(0, min(255, n)))
+            if fy + 1 < grad_h:
+                if fx > 0:
+                    n = fs_img.getpixel((fx - 1, fy + 1)) + int(err * 3 / 16)
+                    fs_img.putpixel((fx - 1, fy + 1), max(0, min(255, n)))
+                n = fs_img.getpixel((fx, fy + 1)) + int(err * 5 / 16)
+                fs_img.putpixel((fx, fy + 1), max(0, min(255, n)))
+                if fx + 1 < grad_w:
+                    n = fs_img.getpixel((fx + 1, fy + 1)) + int(err * 1 / 16)
+                    fs_img.putpixel((fx + 1, fy + 1), max(0, min(255, n)))
+
+    canvas.paste(fs_img, (fs_x, fs_y))
+    draw.rectangle([fs_x, fs_y, fs_x + grad_w, fs_y + grad_h], outline=BLACK)
+
+    block_w, block_h = grad_w // 4, grad_h
     colors = [BLACK, DARK_GREY, LIGHT_GREY, WHITE]
-    bx = dx0 + dither_w + 10
-    start_y = cy - (len(colors) * block_h // 2)
     for i, color in enumerate(colors):
-        by = start_y + (i * block_h)
-        draw.rectangle([bx, by, bx + block_w, by + block_h], fill=color, outline=BLACK)
+        bx = bars_x + i * block_w
+        draw.rectangle([bx, bars_y, bx + block_w, bars_y + block_h], fill=color, outline=BLACK)
+
+    # Fully dithered horizontal gradient bar: black (left) to white (right)
+    grad_x = bars_x
+    grad_y = bars_y + block_h + 14
+    bayer4 = [
+        [0, 8, 2, 10],
+        [12, 4, 14, 6],
+        [3, 11, 1, 9],
+        [15, 7, 13, 5],
+    ]
+    for gy in range(grad_h):
+        for gx in range(grad_w):
+            desired = gx / max(1, grad_w - 1)
+            threshold = (bayer4[gy % 4][gx % 4] + 0.5) / 16.0
+            p_val = WHITE if desired > threshold else BLACK
+            canvas.putpixel((grad_x + gx, grad_y + gy), p_val)
+    draw.rectangle([grad_x, grad_y, grad_x + grad_w, grad_y + grad_h], outline=BLACK)
 
     # Save to buffer
     buf = io.BytesIO()

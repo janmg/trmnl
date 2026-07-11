@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 import io
 import os
-import json
+import sqlite3
 import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from PIL import Image, ImageDraw, ImageFont
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+DB_PATH = os.path.join(BASE_DIR, 'trmnl.db')
 
 def get_weather():
     """Fetch weather data for Helsinki from FMI."""
@@ -75,7 +76,7 @@ def get_weather():
         return None
 
 def get_events(is_generic=False):
-    """Load events from events.json or return generic fallback."""
+    """Load events from SQLite or return generic fallback."""
     if is_generic:
         return [
             ["1 oct, 12:00", "Miina Sillanpää Day"],
@@ -86,13 +87,28 @@ def get_events(is_generic=False):
             ["8 Dec, 12:00", "Jean Sibelius"]
         ]
 
-    json_path = os.path.join(BASE_DIR, 'events.json')
     try:
-        if os.path.exists(json_path):
-            with open(json_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute(
+                'SELECT event_time, title FROM events ORDER BY event_time ASC, title ASC'
+            ).fetchall()
+        if rows:
+            formatted = []
+            for event_time, title in rows:
+                try:
+                    dt = datetime.strptime(str(event_time), '%Y-%m-%d %H:%M:%S')
+                except ValueError:
+                    try:
+                        dt = datetime.strptime(str(event_time), '%Y-%m-%d %H:%M')
+                    except ValueError:
+                        formatted.append([str(event_time), title])
+                        continue
+
+                display_time = f"{dt.day} {dt.strftime('%b').lower()}, {dt.strftime('%H:%M')}"
+                formatted.append([display_time, title])
+            return formatted
     except Exception as e:
-        print(f"Error loading events.json: {e}")
+        print(f"Error loading events from database: {e}")
     
     return [["No events", "found"]]
 

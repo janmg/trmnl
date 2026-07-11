@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import json
 import hashlib
 import secrets
 import time
@@ -21,6 +22,35 @@ DB_PATH = 'trmnl.db'
 CONTENT_DIR = os.path.join(os.path.dirname(__file__), 'content')
 BASE_URL = 'https://trmnl.janmg.com'
 CLOCK_LEAD_SECONDS = 4
+
+
+def normalize_event_time(raw_value):
+    text = str(raw_value).strip()
+    if not text:
+        return None
+
+    # Already normalized ISO-like datetime.
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            dt = datetime.strptime(text, fmt)
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            pass
+
+    # Legacy format from events.json, e.g. "13 jul, 14:45".
+    try:
+        date_part, time_part = [p.strip() for p in text.split(',', 1)]
+        day_text, month_text = date_part.split(' ', 1)
+        day = int(day_text)
+        month = datetime.strptime(month_text.title(), "%b").month
+        hour_text, minute_text = [p.strip() for p in time_part.split(':', 1)]
+        hour = int(hour_text)
+        minute = int(minute_text)
+        year = datetime.now().year
+        dt = datetime(year, month, day, hour, minute)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
 
 
 def seconds_until_aligned_refresh(now_epoch, interval_seconds, lead_seconds=0):
@@ -72,6 +102,78 @@ def init_db():
             conn.execute('ALTER TABLE devices ADD COLUMN custom_text TEXT')
         except sqlite3.OperationalError:
             pass # Already exists
+
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS holidays (
+                date TEXT NOT NULL,
+                name TEXT NOT NULL,
+                source TEXT NOT NULL,
+                PRIMARY KEY (date, name, source)
+            )
+        ''')
+
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS events (
+                event_time DATETIME NOT NULL,
+                title TEXT NOT NULL
+            )
+        ''')
+
+        # Schema migration for legacy events table with id/row_order.
+        info_rows = conn.execute('PRAGMA table_info(events)').fetchall()
+        column_names = [row[1] for row in info_rows]
+        needs_migration = ('id' in column_names) or ('row_order' in column_names)
+        if needs_migration:
+            legacy_rows = conn.execute(
+                'SELECT event_time, title FROM events ORDER BY row_order ASC, id ASC'
+            ).fetchall()
+
+            conn.execute('DROP TABLE events')
+            conn.execute('''
+                CREATE TABLE events (
+                    event_time DATETIME NOT NULL,
+                    title TEXT NOT NULL
+                )
+            ''')
+
+            migrated_rows = []
+            for event_time, title in legacy_rows:
+                normalized = normalize_event_time(event_time)
+                if not normalized:
+                    continue
+                migrated_rows.append((normalized, str(title)))
+
+            if migrated_rows:
+                conn.executemany(
+                    'INSERT INTO events (event_time, title) VALUES (?, ?)',
+                    migrated_rows,
+                )
+
+        # One-time import from events.json if database table is empty.
+        count_row = conn.execute('SELECT COUNT(*) FROM events').fetchone()
+        has_events = (count_row[0] if count_row else 0) > 0
+        if not has_events:
+            events_json_path = os.path.join(os.path.dirname(__file__), 'events.json')
+            if os.path.exists(events_json_path):
+                try:
+                    with open(events_json_path, 'r', encoding='utf-8') as f:
+                        payload = json.load(f)
+                    if isinstance(payload, list):
+                        rows = []
+                        for item in payload:
+                            if not isinstance(item, list) or len(item) != 2:
+                                continue
+                            normalized = normalize_event_time(item[0])
+                            if not normalized:
+                                continue
+                            rows.append((normalized, str(item[1])))
+                        if rows:
+                            conn.executemany(
+                                'INSERT INTO events (event_time, title) VALUES (?, ?)',
+                                rows,
+                            )
+                except Exception as e:
+                    print(f"Error migrating events.json to database: {e}")
 
 @app.before_request
 def log_request_info():
@@ -337,6 +439,12 @@ def get_display():
         refresh_rate,
         lead_seconds,
     )
+    next_target_epoch = int(corrected_now + aligned_refresh_rate)
+    next_target_str = datetime.fromtimestamp(next_target_epoch).strftime('%Y-%m-%d %H:%M:%S')
+    print(
+        f"SCHEDULE {device_id}: item={selected_item}, base_refresh={refresh_rate}s, "
+        f"lead={lead_seconds}s, aligned_refresh={aligned_refresh_rate}s, next_target={next_target_str}"
+    )
 
     response_data = {
         "filename": filename,
@@ -510,7 +618,7 @@ def get_fmi():
 @app.route('/clock')
 def get_clock():
     flip = request.args.get('flip')
-    buf = generate_clock()
+    buf = generate_clock(DB_PATH)
     buf = apply_rotation(buf, flip)
     resp = make_response(send_file(buf, mimetype='image/png'))
     resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
@@ -546,4 +654,4 @@ def get_text():
 if __name__ == '__main__':
     init_db()
     # Run the app on all interfaces at port 5002
-    app.run(host='0.0.0.0', port=5002, debug=False)
+    app.run(host='0.0.0.0', port=5002, debug=True)

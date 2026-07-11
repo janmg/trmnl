@@ -72,6 +72,7 @@ def handle_register(db_path, content_dir):
     mac_encoded = quote(mac_address, safe='')
     preview_items = []
     for item in current_playlist:
+
         label = item
         preview_url = None
 
