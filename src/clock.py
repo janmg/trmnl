@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 import io
+import os
 from datetime import datetime, timezone, timedelta
 from PIL import Image, ImageDraw, ImageFont
+
+BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 
 def generate_clock():
     # Target dimensions: 800 x 480
@@ -16,8 +19,9 @@ def generate_clock():
         # Using a very large size for the clock
         font_size = 180
         font_date_size = 40
-        font = ImageFont.truetype("fonts/dejavuserif-bold.ttf", font_size)
-        font_date = ImageFont.truetype("fonts/dejavuserif-bold.ttf", font_date_size)
+        font_path = os.path.join(BASE_DIR, "fonts", "dejavuserif-bold.ttf")
+        font = ImageFont.truetype(font_path, font_size)
+        font_date = ImageFont.truetype(font_path, font_date_size)
     except:
         font = ImageFont.load_default()
         font_date = ImageFont.load_default()

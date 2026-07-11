@@ -1,24 +1,43 @@
 import sqlite3
 import os
 import hashlib
+import secrets
 import time
 import io
 from datetime import datetime, timezone
 from PIL import Image
 from flask import Flask, request, jsonify, send_from_directory, send_file, make_response, render_template_string
-from testcard import generate_testcard
-from qr_code import generate_qr_code
-from schedule import generate_schedule, get_events
-from xkcd import generate_xkcd
-from fmi import generate_fmi
-from titlecard import generate_titlecard
-from clock import generate_clock
-from register import handle_register
+from src.testcard import generate_testcard
+from src.qr_code import generate_qr_code
+from src.schedule import generate_schedule, get_events
+from src.xkcd import generate_xkcd
+from src.fmi import generate_fmi
+from src.titlecard import generate_titlecard
+from src.clock import generate_clock
+from src.configure import handle_register
 
 app = Flask(__name__)
 DB_PATH = 'trmnl.db'
 CONTENT_DIR = os.path.join(os.path.dirname(__file__), 'content')
 BASE_URL = 'https://trmnl.janmg.com'
+CLOCK_LEAD_SECONDS = 4
+
+
+def seconds_until_aligned_refresh(now_epoch, interval_seconds, lead_seconds=0):
+    interval = max(1, int(interval_seconds or 1))
+    lead = max(0, int(lead_seconds or 0))
+    min_wait = 60
+
+    next_boundary = ((int(now_epoch) // interval) + 1) * interval
+    target = next_boundary - lead
+    if target <= now_epoch:
+        target += interval
+
+    # Keep boundary alignment, but never refresh in under 60 seconds.
+    while (target - now_epoch) < min_wait:
+        target += interval
+
+    return int(target - now_epoch)
 
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
@@ -130,28 +149,21 @@ def apply_rotation(buf, rotate_param):
 @app.route('/api/setup', methods=['GET'])
 def setup():
     # TRMNL API: Device minimal setup response
-    device_id = request.headers.get('ID') or request.headers.get('Id')
-    image_url = f"{BASE_URL}/testcard"
-    flip = 0
-    if device_id:
-        device_id = device_id.strip().upper()
-        image_url += f"?mac_address={device_id}"
-        try:
-            with sqlite3.connect(DB_PATH) as conn:
-                cursor = conn.cursor()
-                cursor.execute('SELECT flip FROM devices WHERE mac_address = ?', (device_id,))
-                row = cursor.fetchone()
-                if row:
-                    flip = row[0] or 0
-        except Exception:
-            pass
-            
-    if flip:
-        image_url += "&flip=1"
-        
+    device_id = request.headers.get('ID') or request.headers.get('Id') or ''
+    normalized = ''.join(ch for ch in device_id.strip().upper() if ch in '0123456789ABCDEF')
+    friendly_id = normalized[-6:] if normalized else ''
+
+    # Keep API key length aligned with the requested sample (22 chars)
+    key_length = 22
+    key_alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+    api_key = ''.join(secrets.choice(key_alphabet) for _ in range(key_length))
+
     response = jsonify({
-        "image_url": image_url,
-        "message": "Welcome to your TRMNL device!"
+        "status": 200,
+        "api_key": api_key,
+        "friendly_id": friendly_id,
+        "image_url": f"{BASE_URL}/testcard",
+        "filename": "testcard"
     })
     response.headers['Connection'] = 'close'
     response.headers['Content-Length'] = len(response.get_data())
@@ -192,6 +204,8 @@ def get_display():
     battery = request.headers.get('Battery-Voltage', '-')
     fw = request.headers.get('Fw-Version', '-')
     ssid = request.headers.get('Wifi-Ssid', '-')
+    corrected_now = time.time()
+    corrected_dt = datetime.fromtimestamp(corrected_now)
 
     try:
         # Check database for playlist and configuration
@@ -205,6 +219,7 @@ def get_display():
         flip = 0
         custom_url = ""
         custom_text = ""
+        selected_item = None
         if row:
             playlist_items = row[0].split(',') if row[0] else []
             refresh_rate = row[1] or 900
@@ -221,8 +236,9 @@ def get_display():
 
         if playlist_items:
             # Simple rotation based on current time
-            idx = int(time.time() / refresh_rate) % len(playlist_items)
+            idx = int(corrected_now / refresh_rate) % len(playlist_items)
             item = playlist_items[idx]
+            selected_item = item
             if app.debug:
                 print(f"DEBUG: Selected item '{item}' from playlist at index {idx}")
             
@@ -237,29 +253,28 @@ def get_display():
                 filename = "schedule.png"
                 # Schedule changes if events change, or if weather might have updated (every hour)
                 events_hash = hashlib.md5(str(get_events()).encode('utf-8')).hexdigest()
-                content_state = f"{events_hash}-{time.strftime('%Y-%m-%d-%H')}"
+                content_state = f"{events_hash}-{corrected_dt.strftime('%Y-%m-%d-%H')}"
             elif item == "xkcd":
                 image_url = f"{BASE_URL}/xkcd?mac_address={device_id}"
                 filename = "xkcd.png"
                 # XKCD changes once a day usually, content_state with hour is safe
-                content_state = f"xkcd-{time.strftime('%Y-%m-%d-%H')}"
+                content_state = f"xkcd-{corrected_dt.strftime('%Y-%m-%d-%H')}"
             elif item == "fmi":
                 image_url = f"{BASE_URL}/fmi?mac_address={device_id}"
                 filename = "fmi.png"
                 # FMI updates every 15 mins, using 15-min bucket for content state
-                minute_bucket = (datetime.now().minute // 15) * 15
-                content_state = f"fmi-{datetime.now().strftime('%Y%m%d%H')}{minute_bucket}"
+                minute_bucket = (corrected_dt.minute // 15) * 15
+                content_state = f"fmi-{corrected_dt.strftime('%Y%m%d%H')}{minute_bucket}"
             elif item == "clock":
                 image_url = f"{BASE_URL}/clock?mac_address={device_id}"
                 filename = "clock.png"
-                # Clock changes every minute. 
-                # Using UTC for content state to keep hash generation consistent
-                content_state = f"clock-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M')}"
+                next_boundary = ((int(corrected_now) // refresh_rate) + 1) * refresh_rate
+                content_state = f"clock-{next_boundary}"
             elif item == "custom_url" and custom_url:
                 image_url = custom_url
                 filename = "custom_url.png"
                 # For external URLs, we don't know when they change, so we refresh periodically
-                content_state = f"custom-{time.strftime('%Y-%m-%d-%H')}"
+                content_state = f"custom-{corrected_dt.strftime('%Y-%m-%d-%H')}"
             elif item == "custom_text" and custom_text:
                 image_url = f"{BASE_URL}/text?mac_address={device_id}"
                 filename = "titlecard.png"
@@ -292,6 +307,7 @@ def get_display():
                 flip = n_row[1] if n_row else 0
 
             if row_name:
+                selected_item = "schedule"
                 if app.debug:
                     print(f"MATCH FOUND: Displaying schedule.png for {device_id} ({row_name})")
                 image_url = f"{BASE_URL}/content/schedule.png"
@@ -300,7 +316,7 @@ def get_display():
                 filename = "schedule.png"
                 # For fallback schedule, update if events change or every hour for weather
                 events_hash = hashlib.md5(str(get_events()).encode('utf-8')).hexdigest()
-                content_state = f"fallback-{events_hash}-{time.strftime('%Y-%m-%d-%H')}"
+                content_state = f"fallback-{events_hash}-{corrected_dt.strftime('%Y-%m-%d-%H')}"
             else:
                 raise Exception("Device not found/not configured")
 
@@ -313,6 +329,14 @@ def get_display():
         refresh_rate = 60 # Faster refresh while registering
         content_state = "unknown-device"
         flip = 0
+        selected_item = "testcard"
+
+    lead_seconds = CLOCK_LEAD_SECONDS if selected_item == "clock" else 0
+    aligned_refresh_rate = seconds_until_aligned_refresh(
+        corrected_now,
+        refresh_rate,
+        lead_seconds,
+    )
 
     response_data = {
         "filename": filename,
@@ -321,7 +345,7 @@ def get_display():
         "image_url": image_url,
         "image_url_timeout": 0,
         "maximum_compatibility": False,
-        "refresh_rate": refresh_rate, 
+        "refresh_rate": aligned_refresh_rate,
         "reset_firmware": False,
         "special_function": "none",
         "temperature_profile": "default",
@@ -331,7 +355,7 @@ def get_display():
 
     # Generate ETag based on the response content and additional change factors
     # day_string ensures at least one refresh per day
-    day_string = time.strftime('%Y-%m-%d')
+    day_string = corrected_dt.strftime('%Y-%m-%d')
     etag_content = f"{filename}-{image_url}-{day_string}-{content_state}-{flip}"
     etag = hashlib.md5(etag_content.encode('utf-8')).hexdigest()
 
@@ -356,8 +380,8 @@ def get_display():
     resp.set_etag(etag)
     return resp
 
-@app.route('/register', methods=['GET', 'POST'])
-def register():
+@app.route('/configure', methods=['GET', 'POST'])
+def configure():
     return handle_register(DB_PATH, CONTENT_DIR)
 
 @app.route('/content/<path:filename>')

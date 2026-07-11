@@ -72,7 +72,7 @@ def generate_testcard(mac_address=None, device_info=None):
     # If Mac Address provided, add a small QR code in the middle
     if mac_address and str(mac_address).strip():
         base_url = "https://trmnl.janmg.com" # Hardcoded for now, or could be passed
-        reg_url = f"{base_url}/register?mac_address={mac_address}"
+        reg_url = f"{base_url}/configure?mac_address={mac_address}"
         
         try:
             qr = qrcode.QRCode(version=1, box_size=4, border=2)

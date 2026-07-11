@@ -7,6 +7,8 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from PIL import Image, ImageDraw, ImageFont
 
+BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+
 def get_weather():
     """Fetch weather data for Helsinki from FMI."""
     url = "https://opendata.fmi.fi/wfs?service=WFS&version=2.0.0&request=getFeature&storedquery_id=fmi::forecast::harmonie::surface::point::simple&place=helsinki&"
@@ -84,7 +86,7 @@ def get_events(is_generic=False):
             ["8 Dec, 12:00", "Jean Sibelius"]
         ]
 
-    json_path = os.path.join(os.path.dirname(__file__), 'events.json')
+    json_path = os.path.join(BASE_DIR, 'events.json')
     try:
         if os.path.exists(json_path):
             with open(json_path, 'r', encoding='utf-8') as f:
@@ -119,8 +121,8 @@ def generate_schedule(is_generic=False):
     col_width = (avail_width - (2 * col_spacing)) // 3
     
     # EXO2 font by Natanael Gama, through Google Fonts. SIL Open Font License, Version 1.1
-    font_path = "fonts/exo2-medium.ttf"
-    font_bold_path = "fonts/exo2-bold.ttf"
+    font_path = os.path.join(BASE_DIR, 'fonts', 'exo2-medium.ttf')
+    font_bold_path = os.path.join(BASE_DIR, 'fonts', 'exo2-bold.ttf')
     try:
         font_main = ImageFont.truetype(font_path, 20)
         font_small = ImageFont.truetype(font_path, 16)

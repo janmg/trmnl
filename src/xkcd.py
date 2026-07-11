@@ -27,14 +27,24 @@ def generate_xkcd():
         # Create a white canvas (800x480)
         canvas = Image.new('RGB', (800, 480), (255, 255, 255))
         
-        # Resize image to fit within the visible area while maintaining aspect ratio
-        img.thumbnail((visible_width, visible_height), Image.Resampling.LANCZOS)
+        # Prefer filling vertical space (450px) without cropping.
+        # If that would exceed visible width, fall back to width-constrained scaling.
+        scale = visible_height / img.height
+        target_w = int(img.width * scale)
+        target_h = visible_height
+
+        if target_w > visible_width:
+            scale = visible_width / img.width
+            target_w = visible_width
+            target_h = int(img.height * scale)
+
+        img = img.resize((max(1, target_w), max(1, target_h)), Image.Resampling.LANCZOS)
         
         # Calculate position to center the image in the visible area
         # Visible area centers are: width=(50 to 750), height=(0 to 450)
         x_offset = 50 + (visible_width - img.width) // 2
         y_offset = (visible_height - img.height) // 2
-        
+
         # Paste comic onto canvas
         canvas.paste(img, (x_offset, y_offset))
         

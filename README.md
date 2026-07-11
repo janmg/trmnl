@@ -70,8 +70,8 @@ API calls are defined by TRMNL, the /api/setup and /api/display are mandatory wi
 
 The devices can be configured using a webbrowser where a playlist can be created
 ```
-https://trmnl.janmg.com/register?mac_address=44:1b:f6:81:9b:fc
-https://trmnl.janmg.com/register?mac_address=e0:72:a1:d8:2e:7c
+https://trmnl.janmg.com/configure?mac_address=44:1b:f6:81:9b:fc
+https://trmnl.janmg.com/configure?mac_address=e0:72:a1:d8:2e:7c
 ```
 It can generate a test card, registration qr code or show prepard content (800x480px png with 4 greyscales)
 
@@ -90,6 +90,9 @@ https://trmnl.janmg.com/content/sandels.png
 https://trmnl.janmg.com/content/test-schedule.png
 https://trmnl.janmg.com/content/test-testcard.png
 
+## URL's
+https://trmnl.com/images/setup/setup-logo.bmp
+https://raw.githubusercontent.com/usetrmnl/trmnl-firmware/refs/heads/main/test.bmp
 https://trmnl-public.s3.us-east-2.amazonaws.com/sw7ldchyw50ge0bg2zzzl5fzqlvl
 
 
@@ -109,6 +112,9 @@ Frame, depth: 3 cm
 
 ## TODO
 implement better margins tracking to scale images to fit in the frame
+
+## Firmware fix for sleep issue on single item not refreshing
+https://github.com/usetrmnl/trmnl-firmware/pull/479
 
 ## TRMNL BYOS
 

@@ -2,12 +2,14 @@ import io
 import os
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
+BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+
 def generate_titlecard(text):
     # Target dimensions: 800 x 480
     width, height = 800, 480
     
     # Try to load the background image from content/titlecard.png
-    bg_path = os.path.join(os.path.dirname(__file__), 'content', 'titlecard.png')
+    bg_path = os.path.join(BASE_DIR, 'content', 'titlecard.png')
     if os.path.exists(bg_path):
         # Convert to 'L' (Grayscale) immediately so drawing white (255) works correctly
         img = Image.open(bg_path).convert('L')
@@ -63,7 +65,7 @@ def generate_titlecard(text):
     try:
         # Much bigger font size as requested (64px)
         font_size = 34
-        font = ImageFont.truetype("fonts/dejavuserif-bold.ttf", font_size)
+        font = ImageFont.truetype(os.path.join(BASE_DIR, 'fonts', 'dejavuserif-bold.ttf'), font_size)
     except:
         font = ImageFont.load_default()
 
