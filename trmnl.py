@@ -13,8 +13,10 @@ from src.qr_code import generate_qr_code
 from src.schedule import generate_schedule, get_events
 from src.xkcd import generate_xkcd
 from src.fmi import generate_fmi
+from src.weather import generate_weather
+from src.map import generate_map
 from src.titlecard import generate_titlecard
-from src.clock import generate_clock
+from src.clock import generate_clock, _current_local_datetime
 from src.configure import handle_register
 
 app = Flask(__name__)
@@ -69,12 +71,34 @@ def seconds_until_aligned_refresh(now_epoch, interval_seconds, lead_seconds=0):
 
     return int(target - now_epoch)
 
+def is_device_sleeping(dt, sleep_start, sleep_end, sleep_weekend):
+    if sleep_weekend and dt.weekday() >= 5:
+        return True
+    
+    if not sleep_start or not sleep_end:
+        return False
+        
+    try:
+        start_h, start_m = map(int, sleep_start.split(':'))
+        end_h, end_m = map(int, sleep_end.split(':'))
+        now_val = dt.hour * 60 + dt.minute
+        start_val = start_h * 60 + start_m
+        end_val = end_h * 60 + end_m
+        
+        if start_val < end_val:
+            return start_val <= now_val < end_val
+        else: # overnight
+            return now_val >= start_val or now_val < end_val
+    except:
+        return False
+
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute('''
             CREATE TABLE IF NOT EXISTS devices (
                 mac_address TEXT PRIMARY KEY,
                 name TEXT,
+                location TEXT,
                 playlist TEXT,
                 refresh_rate INTEGER DEFAULT 900,
                 last_update TEXT,
@@ -83,6 +107,10 @@ def init_db():
                 fw_version TEXT,
                 wifi_ssid TEXT,
                 flip INTEGER DEFAULT 0,
+                sleep_start TEXT,
+                sleep_end TEXT,
+                sleep_weekend INTEGER DEFAULT 0,
+                timezone TEXT DEFAULT 'Europe/Helsinki',
                 custom_url TEXT,
                 custom_text TEXT
             )
@@ -90,6 +118,31 @@ def init_db():
         # Ensure 'flip' column exists (for existing databases)
         try:
             conn.execute('ALTER TABLE devices ADD COLUMN flip INTEGER DEFAULT 0')
+        except sqlite3.OperationalError:
+            pass # Already exists
+        # Ensure 'sleep_start' column exists
+        try:
+            conn.execute('ALTER TABLE devices ADD COLUMN sleep_start TEXT')
+        except sqlite3.OperationalError:
+            pass # Already exists
+        # Ensure 'sleep_end' column exists
+        try:
+            conn.execute('ALTER TABLE devices ADD COLUMN sleep_end TEXT')
+        except sqlite3.OperationalError:
+            pass # Already exists
+        # Ensure 'sleep_weekend' column exists
+        try:
+            conn.execute('ALTER TABLE devices ADD COLUMN sleep_weekend INTEGER DEFAULT 0')
+        except sqlite3.OperationalError:
+            pass # Already exists
+        # Ensure 'timezone' column exists
+        try:
+            conn.execute("ALTER TABLE devices ADD COLUMN timezone TEXT DEFAULT 'Europe/Helsinki'")
+        except sqlite3.OperationalError:
+            pass # Already exists
+        # Ensure 'location' column exists
+        try:
+            conn.execute('ALTER TABLE devices ADD COLUMN location TEXT')
         except sqlite3.OperationalError:
             pass # Already exists
         # Ensure 'custom_url' column exists
@@ -306,14 +359,16 @@ def get_display():
     battery = request.headers.get('Battery-Voltage', '-')
     fw = request.headers.get('Fw-Version', '-')
     ssid = request.headers.get('Wifi-Ssid', '-')
+
+    # We need to initialize corrected_now but the timezone will be fetched from DB 
+    # so we move the datetime calculation AFTER DB fetch.
     corrected_now = time.time()
-    corrected_dt = datetime.fromtimestamp(corrected_now)
 
     try:
         # Check database for playlist and configuration
         with sqlite3.connect(DB_PATH) as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT playlist, refresh_rate, flip, custom_url, custom_text FROM devices WHERE mac_address = ?', (device_id,))
+            cursor.execute('SELECT playlist, refresh_rate, flip, custom_url, custom_text, sleep_start, sleep_end, sleep_weekend, timezone FROM devices WHERE mac_address = ?', (device_id,))
             row = cursor.fetchone()
             
         playlist_items = []
@@ -321,6 +376,10 @@ def get_display():
         flip = 0
         custom_url = ""
         custom_text = ""
+        sleep_start = ""
+        sleep_end = ""
+        sleep_weekend = 0
+        device_timezone = "Europe/Helsinki"
         selected_item = None
         if row:
             playlist_items = row[0].split(',') if row[0] else []
@@ -328,11 +387,19 @@ def get_display():
             flip = row[2] or 0
             custom_url = row[3] or ""
             custom_text = row[4] or ""
+            sleep_start = row[5] or ""
+            sleep_end = row[6] or ""
+            sleep_weekend = row[7] or 0
+            device_timezone = row[8] or "Europe/Helsinki"
             if app.debug:
                 print(f"DEBUG: Found {device_id} in DB. Playlist: {playlist_items}")
         else:
             if app.debug:
                 print(f"DEBUG: Device {device_id} NOT found in DB")
+
+        # Calculate localized datetime based on device timezone
+        from zoneinfo import ZoneInfo
+        corrected_dt = datetime.fromtimestamp(corrected_now, tz=ZoneInfo(device_timezone))
 
         content_state = ""
 
@@ -344,18 +411,17 @@ def get_display():
             if app.debug:
                 print(f"DEBUG: Selected item '{item}' from playlist at index {idx}")
             
-            if item == "testcard":
-                image_url = f"{BASE_URL}/testcard?mac_address={device_id}"
-                filename = "testcard.png"
-                refresh_rate = 60 # Faster refresh while registering
-                # For testcard, content changes if hardware info changes
-                content_state = f"{battery}-{fw}-{ssid}-{request.remote_addr}"
-            elif item == "schedule":
+            if item == "schedule":
                 image_url = f"{BASE_URL}/schedule?mac_address={device_id}"
                 filename = "schedule.png"
                 # Schedule changes if events change, or if weather might have updated (every hour)
                 events_hash = hashlib.md5(str(get_events()).encode('utf-8')).hexdigest()
                 content_state = f"{events_hash}-{corrected_dt.strftime('%Y-%m-%d-%H')}"
+            elif item == "clock":
+                image_url = f"{BASE_URL}/clock?mac_address={device_id}"
+                filename = "clock.png"
+                next_boundary = ((int(corrected_now) // refresh_rate) + 1) * refresh_rate
+                content_state = f"clock-{next_boundary}"
             elif item == "xkcd":
                 image_url = f"{BASE_URL}/xkcd?mac_address={device_id}"
                 filename = "xkcd.png"
@@ -367,11 +433,11 @@ def get_display():
                 # FMI updates every 15 mins, using 15-min bucket for content state
                 minute_bucket = (corrected_dt.minute // 15) * 15
                 content_state = f"fmi-{corrected_dt.strftime('%Y%m%d%H')}{minute_bucket}"
-            elif item == "clock":
-                image_url = f"{BASE_URL}/clock?mac_address={device_id}"
-                filename = "clock.png"
-                next_boundary = ((int(corrected_now) // refresh_rate) + 1) * refresh_rate
-                content_state = f"clock-{next_boundary}"
+            elif item == "map":
+                image_url = f"{BASE_URL}/map?mac_address={device_id}"
+                filename = "map.png"
+                # Update every hour or if location changes
+                content_state = f"map-{corrected_dt.strftime('%Y-%m-%d-%H')}"
             elif item == "custom_url" and custom_url:
                 image_url = custom_url
                 filename = "custom_url.png"
@@ -439,6 +505,11 @@ def get_display():
         refresh_rate,
         lead_seconds,
     )
+
+    if is_device_sleeping(corrected_dt, sleep_start, sleep_end, sleep_weekend):
+        # When sleeping, check back once an hour instead of the normal interval
+        aligned_refresh_rate = max(aligned_refresh_rate, 3600)
+
     next_target_epoch = int(corrected_now + aligned_refresh_rate)
     next_target_str = datetime.fromtimestamp(next_target_epoch).strftime('%Y-%m-%d %H:%M:%S')
     print(
@@ -539,7 +610,7 @@ def get_schedule():
             if cursor.fetchone():
                 is_generic = False
                 
-    buf = generate_schedule(is_generic=is_generic)
+    buf = generate_schedule(is_generic=is_generic, mac_address=mac_address)
     buf = apply_rotation(buf, flip)
     resp = make_response(send_file(buf, mimetype='image/png'))
     resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
@@ -615,10 +686,47 @@ def get_fmi():
     resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return resp
 
+@app.route('/weather')
+def get_weather():
+    mac_address = request.args.get('mac_address') or request.headers.get('ID') or request.headers.get('Id')
+    flip = request.args.get('flip')
+    
+    coords = "60.1581787,24.8668912" # Default
+    tz_name = "Europe/Helsinki"
+
+    if mac_address:
+        mac_address = mac_address.strip().upper()
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT location, timezone FROM devices WHERE mac_address = ?', (mac_address,))
+            row = cursor.fetchone()
+            if row:
+                if row[0]: coords = row[0]
+                if row[1]: tz_name = row[1]
+
+    buf = generate_weather(coords=coords, device_tz_name=tz_name)
+    buf = apply_rotation(buf, flip)
+    resp = make_response(send_file(buf, mimetype='image/png'))
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return resp
+
+@app.route('/map')
+def get_map():
+    mac_address = request.args.get('mac_address') or request.headers.get('ID') or request.headers.get('Id')
+    flip = request.args.get('flip')
+    buf = generate_map(DB_PATH, mac_address)
+    if not buf:
+        return "Failed to fetch map", 500
+    buf = apply_rotation(buf, flip)
+    resp = make_response(send_file(buf, mimetype='image/png'))
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return resp
+
 @app.route('/clock')
 def get_clock():
+    mac_address = request.args.get('mac_address') or request.headers.get('ID') or request.headers.get('Id')
     flip = request.args.get('flip')
-    buf = generate_clock(DB_PATH)
+    buf = generate_clock(DB_PATH, mac_address)
     buf = apply_rotation(buf, flip)
     resp = make_response(send_file(buf, mimetype='image/png'))
     resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'

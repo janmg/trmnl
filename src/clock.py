@@ -26,8 +26,19 @@ MONTH_LOOKUP = {
 }
 
 
-def _current_local_datetime():
-    return datetime.now(ZoneInfo("Europe/Helsinki"))
+def _current_local_datetime(db_path=None, mac_address=None):
+    tz_name = "Europe/Helsinki"
+    if db_path and mac_address:
+        try:
+            with sqlite3.connect(db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT timezone FROM devices WHERE mac_address = ?', (mac_address.strip().upper(),))
+                row = cursor.fetchone()
+                if row and row[0]:
+                    tz_name = row[0]
+        except:
+            pass
+    return datetime.now(ZoneInfo(tz_name))
 
 
 def _ensure_holiday_tables(conn):
@@ -122,11 +133,11 @@ def _fetch_intermin_holidays(year):
     return _dedupe_entries(entries)
 
 
-def sync_holidays(db_path, today=None):
+def sync_holidays(db_path, today=None, mac_address=None):
     if not db_path:
         return
 
-    today = today or _current_local_datetime().date()
+    today = today or _current_local_datetime(db_path, mac_address).date()
     year = today.year
 
     try:
@@ -148,11 +159,11 @@ def sync_holidays(db_path, today=None):
         print(f"Error syncing holidays: {e}")
 
 
-def get_today_holidays(db_path, today=None):
+def get_today_holidays(db_path, today=None, mac_address=None):
     if not db_path:
         return []
 
-    today = today or _current_local_datetime().date()
+    today = today or _current_local_datetime(db_path, mac_address).date()
     today_str = today.isoformat()
 
     try:
@@ -172,7 +183,7 @@ def get_today_holidays(db_path, today=None):
         print(f"Error loading holidays for {today_str}: {e}")
         return []
 
-def generate_clock(db_path=None):
+def generate_clock(db_path=None, mac_address=None):
     # Target dimensions: 800 x 480
     width, height = 800, 480
     
@@ -192,12 +203,12 @@ def generate_clock(db_path=None):
         font = ImageFont.load_default()
         font_date = ImageFont.load_default()
     
-    now = _current_local_datetime()
+    now = _current_local_datetime(db_path, mac_address)
     
     current_time = now.strftime("%H:%M")
     # Get fully written out date (e.g., "Friday, October 10, 2026")
     current_date = now.strftime("%A, %B %d, %Y")
-    holiday_names = get_today_holidays(db_path, now.date())
+    holiday_names = get_today_holidays(db_path, now.date(), mac_address)
     holiday_text = " · ".join(holiday_names) if holiday_names else ""
 
     try:

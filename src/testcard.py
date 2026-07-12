@@ -117,16 +117,17 @@ def generate_testcard(mac_address=None, device_info=None):
     bars_x = 110
     bars_y = (cy - 60) + (15 * 6) + 15
     grad_w, grad_h = 260, 34
+    block_w, block_h = grad_w // 4, grad_h
 
-    # Floyd-Steinberg dithered gradient box (white -> black), above the 4-color bars
+    # Place the Floyd-Steinberg bar at the bottom, with the other two shifted upward.
     fs_x = bars_x
-    fs_y = bars_y - grad_h - 12
+    fs_y = bars_y + grad_h + 14
     fs_img = Image.new('L', (grad_w, grad_h), WHITE)
 
     # Start with smooth grayscale gradient
     for fy in range(grad_h):
         for fx in range(grad_w):
-            v = int(255 - (fx / max(1, grad_w - 1)) * 255)
+            v = int((fx / max(1, grad_w - 1)) * 255)
             fs_img.putpixel((fx, fy), v)
 
     # Floyd-Steinberg dithering to black/white
@@ -150,18 +151,14 @@ def generate_testcard(mac_address=None, device_info=None):
                     n = fs_img.getpixel((fx + 1, fy + 1)) + int(err * 1 / 16)
                     fs_img.putpixel((fx + 1, fy + 1), max(0, min(255, n)))
 
-    canvas.paste(fs_img, (fs_x, fs_y))
-    draw.rectangle([fs_x, fs_y, fs_x + grad_w, fs_y + grad_h], outline=BLACK)
-
-    block_w, block_h = grad_w // 4, grad_h
     colors = [BLACK, DARK_GREY, LIGHT_GREY, WHITE]
     for i, color in enumerate(colors):
         bx = bars_x + i * block_w
-        draw.rectangle([bx, bars_y, bx + block_w, bars_y + block_h], fill=color, outline=BLACK)
+        draw.rectangle([bx, bars_y - grad_h - 12, bx + block_w, bars_y - grad_h - 12 + block_h], fill=color, outline=BLACK)
 
     # Fully dithered horizontal gradient bar: black (left) to white (right)
     grad_x = bars_x
-    grad_y = bars_y + block_h + 14
+    grad_y = bars_y
     bayer4 = [
         [0, 8, 2, 10],
         [12, 4, 14, 6],
@@ -175,6 +172,9 @@ def generate_testcard(mac_address=None, device_info=None):
             p_val = WHITE if desired > threshold else BLACK
             canvas.putpixel((grad_x + gx, grad_y + gy), p_val)
     draw.rectangle([grad_x, grad_y, grad_x + grad_w, grad_y + grad_h], outline=BLACK)
+
+    canvas.paste(fs_img, (fs_x, fs_y))
+    draw.rectangle([fs_x, fs_y, fs_x + grad_w, fs_y + grad_h], outline=BLACK)
 
     # Save to buffer
     buf = io.BytesIO()

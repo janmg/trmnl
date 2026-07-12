@@ -5,14 +5,28 @@ import sqlite3
 import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from PIL import Image, ImageDraw, ImageFont
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'trmnl.db')
 
-def get_weather():
-    """Fetch weather data for Helsinki from FMI."""
-    url = "https://opendata.fmi.fi/wfs?service=WFS&version=2.0.0&request=getFeature&storedquery_id=fmi::forecast::harmonie::surface::point::simple&place=helsinki&"
+def get_weather(mac_address=None):
+    """Fetch weather data using device's location or fallback to Helsinki."""
+    coords = "60.1695,24.9355" # Default Helsinki
+    if mac_address:
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT location FROM devices WHERE mac_address = ?', (mac_address.strip().upper(),))
+                row = cursor.fetchone()
+                if row and row[0]:
+                    coords = row[0]
+        except Exception as e:
+            print(f"DEBUG: Error reading location for weather: {e}")
+
+    lat, lon = [v.strip() for v in coords.split(",", 1)]
+    url = f"https://opendata.fmi.fi/wfs?service=WFS&version=2.0.0&request=getFeature&storedquery_id=fmi::forecast::harmonie::surface::point::simple&latlon={lat},{lon}&"
     
     try:
         response = requests.get(url, timeout=10)
@@ -32,8 +46,6 @@ def get_weather():
         current_temp = None
         
         now = datetime.now(timezone.utc)
-        # EET/EEST Offset (Helsinki). Currently UTC+3 for July.
-        local_now = now + timedelta(hours=3)
         # We want data for "today" in local time
         # Let's just look at the next 18 hours of forecast to represent "today"
         end_period = now + timedelta(hours=18)
@@ -112,7 +124,7 @@ def get_events(is_generic=False):
     
     return [["No events", "found"]]
 
-def generate_schedule(is_generic=False):
+def generate_schedule(is_generic=False, mac_address=None):
     # 800x480 Grayscale
     width, height = 800, 480
     # 4 tones: black, dark grey, light grey, white
@@ -123,6 +135,21 @@ def generate_schedule(is_generic=False):
 
     canvas = Image.new('L', (width, height), WHITE)
     draw = ImageDraw.Draw(canvas)
+    
+    # Timezone handling
+    device_tz = ZoneInfo("Europe/Helsinki")
+    if mac_address:
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT timezone FROM devices WHERE mac_address = ?', (mac_address.strip().upper(),))
+                row = cursor.fetchone()
+                if row and row[0]:
+                    device_tz = ZoneInfo(row[0])
+        except Exception as e:
+            print(f"DEBUG: Error reading timezone for schedule: {e}")
+
+    now = datetime.now(device_tz)
     
     # Margins: 50px left/right, 60px bottom (increased to leave more whitespace)
     margin_left = 50
@@ -156,7 +183,7 @@ def generate_schedule(is_generic=False):
         font_huge_bold = ImageFont.load_default()
         font_xl = ImageFont.load_default()
 
-    weather = get_weather()
+    weather = get_weather(mac_address=mac_address)
     
     # Column 1 - Light Grey background
     c1_x0 = margin_left
@@ -165,7 +192,21 @@ def generate_schedule(is_generic=False):
     
     # Text in Column 1
     y = margin_top + 20
-    draw.text((c1_x0 + 15, y), "Helsinki", font=font_large, fill=BLACK)
+    
+    # Use device name if available
+    display_title = "TRMNL"
+    if mac_address:
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT name FROM devices WHERE mac_address = ?', (mac_address.strip().upper(),))
+                row = cursor.fetchone()
+                if row and row[0]:
+                    display_title = row[0]
+        except:
+            pass
+            
+    draw.text((c1_x0 + 15, y), display_title, font=font_large, fill=BLACK)
     
     # Weather sub-box
     weather_y0 = margin_top + 60

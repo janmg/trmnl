@@ -1,7 +1,61 @@
 import sqlite3
 import os
+import requests
+import json
 from urllib.parse import quote
 from flask import request, render_template_string
+
+def lookup_coordinates_and_timezone(location_str):
+    if not location_str:
+        return None, None
+    
+    # Defaults
+    coords = None
+    tz_name = "Europe/Helsinki"
+
+    # Check if it already looks like coordinates
+    parts = location_str.split(',')
+    if len(parts) == 2:
+        try:
+            float(parts[0])
+            float(parts[1])
+            coords = location_str.strip()
+        except ValueError:
+            pass
+
+    # For TZ, we'll try to find an API that gives both.
+    # The 'Hacker Way' is often using a public geocoder that includes TZ.
+    # nominatim doesn't have it. Let's try the 'Geocode.maps.co' or similar if no key,
+    # but for stability we can use the 'lat'/'lon' with a TZ-only API.
+    
+    try:
+        # Step 1: Geocode if not already coordinates
+        if not coords:
+            url = f"https://nominatim.openstreetmap.org/search?q={quote(location_str)}&format=json&limit=1"
+            headers = {'User-Agent': 'TRMNL-Config/1.0'}
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data:
+                    coords = f"{data[0]['lat']},{data[0]['lon']}"
+                    print(f"DEBUG: Geocoded '{location_str}' to {coords}")
+
+        # Step 2: Timezone lookup from coordinates using offline library
+        if coords:
+            lat, lon = [v.strip() for v in coords.split(',', 1)]
+            try:
+                from timezonefinder import TimezoneFinder
+                tf = TimezoneFinder()
+                found = tf.timezone_at(lat=float(lat), lng=float(lon))
+                if found:
+                    tz_name = found
+                    print(f"DEBUG: timezonefinder resolved {coords} -> {tz_name}")
+            except Exception as tf_err:
+                print(f"DEBUG: timezonefinder error: {tf_err}")
+    except Exception as e:
+        print(f"Location/TZ lookup error: {e}")
+
+    return coords, tz_name
 
 def handle_register(db_path, content_dir):
     mac_address = request.args.get('mac_address') or request.form.get('mac_address')
@@ -12,7 +66,7 @@ def handle_register(db_path, content_dir):
     message = ""
     
     # Options from static + content directory
-    generated_options = ["testcard", "schedule", "xkcd", "fmi", "clock"]
+    generated_options = ["testcard", "schedule", "xkcd", "fmi", "weather", "clock", "map"]
     content_options = sorted([f.replace('.png', '') for f in os.listdir(content_dir) if f.endswith('.png')])
     content_options = [f for f in content_options if f not in generated_options]
 
@@ -21,43 +75,57 @@ def handle_register(db_path, content_dir):
     if request.method == 'POST':
         selected_items = request.form.getlist('playlist')
         name = request.form.get('name')
+        location_raw = request.form.get('location', '').strip()
+        location, tz_name = lookup_coordinates_and_timezone(location_raw)
         refresh_min = int(request.form.get('refresh_rate', 15))
         refresh_sec = refresh_min * 60
         flip = 1 if request.form.get('flip') else 0
+        sleep_start = request.form.get('sleep_start', '').strip()
+        sleep_end = request.form.get('sleep_end', '').strip()
+        sleep_weekend = 1 if request.form.get('sleep_weekend') else 0
         custom_url = request.form.get('custom_url', '').strip()
         custom_text = request.form.get('custom_text', '').strip()
         playlist_str = ",".join(selected_items)
         
         with sqlite3.connect(db_path) as conn:
             conn.execute('''
-                INSERT INTO devices (mac_address, name, playlist, refresh_rate, flip, custom_url, custom_text) 
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO devices (mac_address, name, location, playlist, refresh_rate, flip, sleep_start, sleep_end, sleep_weekend, timezone, custom_url, custom_text) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(mac_address) DO UPDATE SET 
-                name=excluded.name, playlist=excluded.playlist, refresh_rate=excluded.refresh_rate, 
-                flip=excluded.flip, custom_url=excluded.custom_url, custom_text=excluded.custom_text
-            ''', (mac_address, name or f"Device {mac_address[-5:]}", playlist_str, refresh_sec, flip, custom_url, custom_text))
+                name=excluded.name, location=excluded.location, playlist=excluded.playlist, refresh_rate=excluded.refresh_rate, 
+                flip=excluded.flip, sleep_start=excluded.sleep_start, sleep_end=excluded.sleep_end, sleep_weekend=excluded.sleep_weekend,
+                timezone=excluded.timezone, custom_url=excluded.custom_url, custom_text=excluded.custom_text
+            ''', (mac_address, name or f"Device {mac_address[-5:]}", location, playlist_str, refresh_sec, flip, sleep_start, sleep_end, sleep_weekend, tz_name, custom_url, custom_text))
         
-        message = f"Device {mac_address} updated!"
+        message = f"Device {mac_address} updated! Timezone: {tz_name}"
+        current_timezone = tz_name
+        current_location = location
 
     # GET request or after POST: show form
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT name, playlist, refresh_rate, last_update, last_filename, battery_voltage, fw_version, wifi_ssid, flip, custom_url, custom_text FROM devices WHERE mac_address = ?', (mac_address,))
+        cursor.execute('SELECT name, location, playlist, refresh_rate, last_update, last_filename, battery_voltage, fw_version, wifi_ssid, flip, sleep_start, sleep_end, sleep_weekend, timezone, custom_url, custom_text FROM devices WHERE mac_address = ?', (mac_address,))
         row = cursor.fetchone()
         if row:
             device_name = row[0]
-            current_playlist = row[1].split(',') if row[1] else []
-            current_refresh_min = (row[2] or 900) // 60
-            last_update = row[3] or "Never"
-            last_filename = row[4] or "None"
-            battery = row[5] or "-"
-            fw_version = row[6] or "-"
-            wifi_ssid = row[7] or "-"
-            current_flip = row[8] or 0
-            current_custom_url = row[9] or ""
-            current_custom_text = row[10] or ""
+            current_location = row[1] or ""
+            current_playlist = row[2].split(',') if row[2] else []
+            current_refresh_min = (row[3] or 900) // 60
+            last_update = row[4] or "Never"
+            last_filename = row[5] or "None"
+            battery = row[6] or "-"
+            fw_version = row[7] or "-"
+            wifi_ssid = row[8] or "-"
+            current_flip = row[9] or 0
+            current_sleep_start = row[10] or ""
+            current_sleep_end = row[11] or ""
+            current_sleep_weekend = row[12] or 0
+            current_timezone = row[13] or "Europe/Helsinki"
+            current_custom_url = row[14] or ""
+            current_custom_text = row[15] or ""
         else:
             device_name = f"Device {mac_address[-5:]}"
+            current_location = ""
             current_playlist = []
             current_refresh_min = 15
             last_update = "Never"
@@ -66,6 +134,10 @@ def handle_register(db_path, content_dir):
             fw_version = "-"
             wifi_ssid = "-"
             current_flip = 0
+            current_sleep_start = ""
+            current_sleep_end = ""
+            current_sleep_weekend = 0
+            current_timezone = "Europe/Helsinki"
             current_custom_url = ""
             current_custom_text = ""
 
@@ -84,8 +156,12 @@ def handle_register(db_path, content_dir):
             preview_url = "/xkcd"
         elif item == "fmi":
             preview_url = "/fmi"
+        elif item == "weather":
+            preview_url = "/weather"
         elif item == "clock":
-            preview_url = "/clock"
+            preview_url = f"/clock?mac_address={mac_encoded}"
+        elif item == "map":
+            preview_url = f"/map?mac_address={mac_encoded}"
         elif item == "custom_text":
             label = "custom_text"
             preview_url = f"/text?mac_address={mac_encoded}"
@@ -304,12 +380,32 @@ def handle_register(db_path, content_dir):
                         </div>
 
                         <div class="form-group">
+                            <label for="location">Location (City or GPS Coordinates)</label>
+                            <input type="text" id="location" name="location" value="{{ current_location }}" placeholder="e.g. Helsinki or 60.1699,24.9384">
+                            <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.25rem;">
+                                Timezone: {{ current_timezone }}
+                            </div>
+                        </div>
+
+                        <div class="form-group">
                             <label for="refresh_rate">Refresh Interval</label>
                             <select id="refresh_rate" name="refresh_rate">
                                 {% for min in refresh_options %}
                                 <option value="{{ min }}" {% if min == current_refresh_min %}selected{% endif %}>{{ min }} minutes</option>
                                 {% endfor %}
                             </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label>Prolonged Sleeping (Stop Refreshing)</label>
+                            <div style="display: flex; gap: 0.5rem; margin-bottom: 0.5rem;">
+                                <input type="text" name="sleep_start" value="{{ current_sleep_start }}" placeholder="Start (e.g. 22:00)" style="flex: 1;">
+                                <input type="text" name="sleep_end" value="{{ current_sleep_end }}" placeholder="End (e.g. 07:00)" style="flex: 1;">
+                            </div>
+                            <div class="checkbox-item">
+                                <input type="checkbox" id="sleep_weekend" name="sleep_weekend" value="1" {% if current_sleep_weekend %}checked{% endif %}>
+                                <label for="sleep_weekend">Sleep during weekends</label>
+                            </div>
                         </div>
 
                         <div class="form-group">
@@ -403,5 +499,10 @@ def handle_register(db_path, content_dir):
                                   refresh_options=refresh_options, current_refresh_min=current_refresh_min,
                                   message=message, last_update=last_update, last_filename=last_filename,
                                   battery=battery, fw_version=fw_version, wifi_ssid=wifi_ssid,
-                                  current_flip=current_flip, current_custom_url=current_custom_url,
+                                  current_location=current_location,
+                                  current_flip=current_flip, 
+                                  current_sleep_start=current_sleep_start, current_sleep_end=current_sleep_end,
+                                  current_sleep_weekend=current_sleep_weekend,
+                                  current_timezone=current_timezone,
+                                  current_custom_url=current_custom_url,
                                   current_custom_text=current_custom_text)
