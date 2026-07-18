@@ -13,6 +13,7 @@ WIDTH = 800
 HEIGHT = 480
 CACHE_DIR = "content/cache/maps"
 DEFAULT_ZOOM = 13
+MAP_RENDER_VERSION = 2
 
 def generate_map(db_path=None, mac_address=None):
     # Ensure cache directory exists
@@ -35,7 +36,9 @@ def generate_map(db_path=None, mac_address=None):
             print(f"DEBUG: Error reading location for map: {e}")
 
     # Check cache first
-    cache_filename = f"map_{lat}_{lon}_{zoom}.png"
+    # Include the render version so existing oversized cache files are not
+    # reused after changing the e-paper palette/compression settings.
+    cache_filename = f"map_v{MAP_RENDER_VERSION}_{lat}_{lon}_{zoom}.png"
     cache_path = os.path.join(CACHE_DIR, cache_filename)
 
     if os.path.exists(cache_path):
@@ -77,18 +80,20 @@ def generate_map(db_path=None, mac_address=None):
     crop_y = int((world_y - min_ty) * 512 - (HEIGHT // 2))
     img = canvas.crop((crop_x, crop_y, crop_x + WIDTH, crop_y + HEIGHT))
     
-    # Convert to 4-bit grayscale (16 levels)
+    # The non-PSRAM firmware rejects images over 90,000 bytes. Four grayscale
+    # levels are sufficient for the e-paper map and produce a substantially
+    # smaller PNG than the previous 16-level output.
     img = img.convert('L')
-    img = img.quantize(colors=16).convert('L')
+    img = img.quantize(colors=4, method=Image.Quantize.MEDIANCUT)
 
     # Save to cache
     try:
-        img.save(cache_path, format='PNG')
+        img.save(cache_path, format='PNG', optimize=True)
         print(f"DEBUG: Saved map to cache: {cache_path}")
     except Exception as e:
         print(f"DEBUG: Failed to save map to cache: {e}")
 
     buf = io.BytesIO()
-    img.save(buf, format='PNG')
+    img.save(buf, format='PNG', optimize=True)
     buf.seek(0)
     return buf
