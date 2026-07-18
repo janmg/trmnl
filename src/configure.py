@@ -1,9 +1,10 @@
-import sqlite3
 import os
 import requests
 import json
 from urllib.parse import quote
 from flask import request, render_template_string
+
+from src.db import list_devices, upsert_device_config, get_device_config_row
 
 def lookup_coordinates_and_timezone(location_str):
     if not location_str:
@@ -58,12 +59,7 @@ def lookup_coordinates_and_timezone(location_str):
     return coords, tz_name
 
 def render_device_list(db_path):
-    with sqlite3.connect(db_path) as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT mac_address, name FROM devices ORDER BY name')
-        rows = cursor.fetchall()
-
-    devices = [{"mac_address": r[0], "name": r[1] or r[0]} for r in rows]
+    devices = list_devices(db_path)
 
     html = '''
     <!DOCTYPE html>
@@ -133,87 +129,79 @@ def handle_register(db_path, content_dir):
         custom_url = request.form.get('custom_url', '').strip()
         custom_text = request.form.get('custom_text', '').strip()
         playlist_str = ",".join(selected_items)
-        
-        with sqlite3.connect(db_path) as conn:
-            conn.execute('''
-                INSERT INTO devices (mac_address, name, location, playlist, refresh_rate, flip, sleep_start, sleep_end, sleep_weekend, timezone, custom_url, custom_text) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(mac_address) DO UPDATE SET 
-                name=excluded.name, location=excluded.location, playlist=excluded.playlist, refresh_rate=excluded.refresh_rate, 
-                flip=excluded.flip, sleep_start=excluded.sleep_start, sleep_end=excluded.sleep_end, sleep_weekend=excluded.sleep_weekend,
-                timezone=excluded.timezone, custom_url=excluded.custom_url, custom_text=excluded.custom_text
-            ''', (mac_address, name or f"Device {mac_address[-5:]}", location, playlist_str, refresh_sec, flip, sleep_start, sleep_end, sleep_weekend, tz_name, custom_url, custom_text))
-        
+
+        upsert_device_config(
+            db_path, mac_address, name or f"Device {mac_address[-5:]}", location, playlist_str,
+            refresh_sec, flip, sleep_start, sleep_end, sleep_weekend, tz_name, custom_url, custom_text
+        )
+
         message = f"Device {mac_address} updated!"
         current_timezone = tz_name
         current_location = location
 
     # GET request or after POST: show form
-    with sqlite3.connect(db_path) as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT name, location, playlist, refresh_rate, last_update, last_filename, battery_voltage, fw_version, wifi_ssid, flip, sleep_start, sleep_end, sleep_weekend, timezone, custom_url, custom_text FROM devices WHERE mac_address = ?', (mac_address,))
-        row = cursor.fetchone()
-        if row:
-            device_name = row[0]
-            current_location = row[1] or ""
-            current_playlist = row[2].split(',') if row[2] else []
-            current_refresh_min = (row[3] or 900) // 60
-            last_update = row[4] or "Never"
-            try:
-                from datetime import datetime, timedelta
-                from zoneinfo import ZoneInfo
+    row = get_device_config_row(db_path, mac_address)
+    if row:
+        device_name = row['name']
+        current_location = row['location'] or ""
+        current_playlist = row['playlist'].split(',') if row['playlist'] else []
+        current_refresh_min = (row['refresh_rate'] or 900) // 60
+        last_update = row['last_update'] or "Never"
+        try:
+            from datetime import datetime, timedelta
+            from zoneinfo import ZoneInfo
 
-                refresh_secs = int(row[3]) if row[3] else 60
-                tz = row[13] or 'Europe/Helsinki'
+            refresh_secs = int(row['refresh_rate']) if row['refresh_rate'] else 60
+            tz = row['timezone'] or 'Europe/Helsinki'
 
-                if last_update and last_update != "Never":
-                    # Interpret stored `last_update` as the device-local time
-                    # (stored without TZ suffix). Make it timezone-aware so
-                    # additions and formatting use the correct timezone.
-                    lu_dt = datetime.strptime(last_update, '%Y-%m-%d %H:%M:%S')
-                    try:
-                        lu_dt = lu_dt.replace(tzinfo=ZoneInfo(tz))
-                    except Exception:
-                        lu_dt = lu_dt
+            if last_update and last_update != "Never":
+                # Interpret stored `last_update` as the device-local time
+                # (stored without TZ suffix). Make it timezone-aware so
+                # additions and formatting use the correct timezone.
+                lu_dt = datetime.strptime(last_update, '%Y-%m-%d %H:%M:%S')
+                try:
+                    lu_dt = lu_dt.replace(tzinfo=ZoneInfo(tz))
+                except Exception:
+                    lu_dt = lu_dt
 
-                    next_dt = lu_dt + timedelta(seconds=refresh_secs)
-                    try:
-                        next_update = next_dt.astimezone(ZoneInfo(tz)).strftime('%Y-%m-%d %H:%M:%S')
-                    except Exception:
-                        next_update = next_dt.strftime('%Y-%m-%d %H:%M:%S')
-                else:
-                    next_update = "Unknown"
-            except Exception:
+                next_dt = lu_dt + timedelta(seconds=refresh_secs)
+                try:
+                    next_update = next_dt.astimezone(ZoneInfo(tz)).strftime('%Y-%m-%d %H:%M:%S')
+                except Exception:
+                    next_update = next_dt.strftime('%Y-%m-%d %H:%M:%S')
+            else:
                 next_update = "Unknown"
-            last_filename = row[5] or "None"
-            battery = row[6] or "-"
-            fw_version = row[7] or "-"
-            wifi_ssid = row[8] or "-"
-            current_flip = row[9] or 0
-            current_sleep_start = row[10] or ""
-            current_sleep_end = row[11] or ""
-            current_sleep_weekend = row[12] or 0
-            current_timezone = row[13] or "Europe/Helsinki"
-            current_custom_url = row[14] or ""
-            current_custom_text = row[15] or ""
-        else:
-            device_name = f"Device {mac_address[-5:]}"
-            current_location = ""
-            current_playlist = []
-            current_refresh_min = 15
-            last_update = "Never"
-            last_filename = "None"
-            battery = "-"
-            fw_version = "-"
-            wifi_ssid = "-"
-            current_flip = 0
-            current_sleep_start = ""
-            current_sleep_end = ""
-            current_sleep_weekend = 0
-            current_timezone = "Europe/Helsinki"
-            current_custom_url = ""
-            current_custom_text = ""
+        except Exception:
             next_update = "Unknown"
+        last_filename = row['last_filename'] or "None"
+        battery = row['battery_voltage'] or "-"
+        fw_version = row['fw_version'] or "-"
+        wifi_ssid = row['wifi_ssid'] or "-"
+        current_flip = row['flip'] or 0
+        current_sleep_start = row['sleep_start'] or ""
+        current_sleep_end = row['sleep_end'] or ""
+        current_sleep_weekend = row['sleep_weekend'] or 0
+        current_timezone = row['timezone'] or "Europe/Helsinki"
+        current_custom_url = row['custom_url'] or ""
+        current_custom_text = row['custom_text'] or ""
+    else:
+        device_name = f"Device {mac_address[-5:]}"
+        current_location = ""
+        current_playlist = []
+        current_refresh_min = 15
+        last_update = "Never"
+        last_filename = "None"
+        battery = "-"
+        fw_version = "-"
+        wifi_ssid = "-"
+        current_flip = 0
+        current_sleep_start = ""
+        current_sleep_end = ""
+        current_sleep_weekend = 0
+        current_timezone = "Europe/Helsinki"
+        current_custom_url = ""
+        current_custom_text = ""
+        next_update = "Unknown"
 
     mac_encoded = quote(mac_address, safe='')
     preview_items = []

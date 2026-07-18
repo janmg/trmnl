@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 import io
 import os
-import sqlite3
 import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from PIL import Image, ImageDraw, ImageFont
+
+from src.db import get_device_location, get_device_timezone, get_device_name, get_events_raw
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'trmnl.db')
@@ -16,12 +17,9 @@ def get_weather(mac_address=None):
     coords = "60.1695,24.9355" # Default Helsinki
     if mac_address:
         try:
-            with sqlite3.connect(DB_PATH) as conn:
-                cursor = conn.cursor()
-                cursor.execute('SELECT location FROM devices WHERE mac_address = ?', (mac_address.strip().upper(),))
-                row = cursor.fetchone()
-                if row and row[0]:
-                    coords = row[0]
+            location = get_device_location(DB_PATH, mac_address)
+            if location:
+                coords = location
         except Exception as e:
             print(f"DEBUG: Error reading location for weather: {e}")
 
@@ -100,10 +98,7 @@ def get_events(is_generic=False):
         ]
 
     try:
-        with sqlite3.connect(DB_PATH) as conn:
-            rows = conn.execute(
-                'SELECT event_time, title FROM events ORDER BY event_time ASC, title ASC'
-            ).fetchall()
+        rows = get_events_raw(DB_PATH)
         if rows:
             formatted = []
             for event_time, title in rows:
@@ -140,12 +135,7 @@ def generate_schedule(is_generic=False, mac_address=None):
     device_tz = ZoneInfo("Europe/Helsinki")
     if mac_address:
         try:
-            with sqlite3.connect(DB_PATH) as conn:
-                cursor = conn.cursor()
-                cursor.execute('SELECT timezone FROM devices WHERE mac_address = ?', (mac_address.strip().upper(),))
-                row = cursor.fetchone()
-                if row and row[0]:
-                    device_tz = ZoneInfo(row[0])
+            device_tz = ZoneInfo(get_device_timezone(DB_PATH, mac_address))
         except Exception as e:
             print(f"DEBUG: Error reading timezone for schedule: {e}")
 
@@ -197,13 +187,10 @@ def generate_schedule(is_generic=False, mac_address=None):
     display_title = "TRMNL"
     if mac_address:
         try:
-            with sqlite3.connect(DB_PATH) as conn:
-                cursor = conn.cursor()
-                cursor.execute('SELECT name FROM devices WHERE mac_address = ?', (mac_address.strip().upper(),))
-                row = cursor.fetchone()
-                if row and row[0]:
-                    display_title = row[0]
-        except:
+            name = get_device_name(DB_PATH, mac_address)
+            if name:
+                display_title = name
+        except Exception:
             pass
             
     draw.text((c1_x0 + 15, y), display_title, font=font_large, fill=BLACK)

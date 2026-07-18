@@ -1,9 +1,10 @@
 import math
 import io
 import os
-import sqlite3
 import requests
 from PIL import Image
+
+from src.db import get_device_location
 
 MAPTILER_API_KEY = "KQgAXC6ARiLV7SshYzas"
 # Using backdrop-v4 as it's cleaner for E-ink
@@ -24,15 +25,12 @@ def generate_map(db_path=None, mac_address=None):
     
     if db_path and mac_address:
         try:
-            with sqlite3.connect(db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute('SELECT location FROM devices WHERE mac_address = ?', (mac_address.strip().upper(),))
-                row = cursor.fetchone()
-                if row and row[0]:
-                    parts = row[0].split(',')
-                    if len(parts) == 2:
-                        lat = float(parts[0])
-                        lon = float(parts[1])
+            location = get_device_location(db_path, mac_address)
+            if location:
+                parts = location.split(',')
+                if len(parts) == 2:
+                    lat = float(parts[0])
+                    lon = float(parts[1])
         except Exception as e:
             print(f"DEBUG: Error reading location for map: {e}")
 

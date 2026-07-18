@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
+import html
 import io
 import os
 import re
-import sqlite3
 from datetime import datetime, timezone, timedelta
 import requests
 from PIL import Image, ImageDraw, ImageFont
 from zoneinfo import ZoneInfo
+
+from src.db import get_device_timezone, replace_holidays_for_year, get_holidays_for_date
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 
@@ -30,26 +32,10 @@ def _current_local_datetime(db_path=None, mac_address=None):
     tz_name = "Europe/Helsinki"
     if db_path and mac_address:
         try:
-            with sqlite3.connect(db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute('SELECT timezone FROM devices WHERE mac_address = ?', (mac_address.strip().upper(),))
-                row = cursor.fetchone()
-                if row and row[0]:
-                    tz_name = row[0]
-        except:
+            tz_name = get_device_timezone(db_path, mac_address, default=tz_name)
+        except Exception:
             pass
     return datetime.now(ZoneInfo(tz_name))
-
-
-def _ensure_holiday_tables(conn):
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS holidays (
-            date TEXT NOT NULL,
-            name TEXT NOT NULL,
-            source TEXT NOT NULL,
-            PRIMARY KEY (date, name, source)
-        )
-    ''')
 
 
 def _normalize_name(name):
@@ -69,29 +55,41 @@ def _dedupe_entries(entries):
 
 def _fetch_timeanddate_holidays(year):
     url = f"https://www.timeanddate.com/calendar/print.html?year={year}&country=24&hol=268439833"
-    response = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+    # The site's anti-scraping check rejects a bare "Mozilla/5.0" User-Agent
+    # with a 403; a full browser-like header set (plus a Referer pointing at
+    # the corresponding non-print holiday page) is accepted.
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": f"https://www.timeanddate.com/holidays/finland/{year}",
+        "Sec-Fetch-Mode": "navigate",
+    }
+    response = requests.get(url, timeout=20, headers=headers)
     response.raise_for_status()
 
-    text = re.sub(r'\s+', ' ', response.text)
-    marker = text.lower().find('calendar generated on')
-    if marker != -1:
-        segment = text[max(0, marker - 1800):marker]
-    else:
-        segment = text[-2500:]
+    text = response.text
 
-    pair_pattern = re.compile(r'(\d{1,2}\s+[A-Z][a-z]{2})\s+(.+?)(?=\s+\d{1,2}\s+[A-Z][a-z]{2}|\s*$)')
+    # Each holiday is rendered as a table row containing a date cell
+    # ("<td><span class=...>1 Jan</span></td>" or plain "<td>1 Jan</td>")
+    # immediately followed by a name cell ("<td>New Year's Day</td>").
+    row_pattern = re.compile(
+        r'<td[^>]*><span[^>]*>(\d{1,2})\s+([A-Za-z]{3})</span></td><td>(.*?)</td>'
+        r'|<td>(\d{1,2})\s+([A-Za-z]{3})</td><td>(.*?)</td>'
+    )
     entries = []
 
-    for date_label, raw_name in pair_pattern.findall(segment):
-        parts = date_label.split()
-        if len(parts) != 2:
-            continue
-        day_text, month_text = parts
+    for match in row_pattern.finditer(text):
+        if match.group(1):
+            day_text, month_text, raw_name = match.group(1), match.group(2), match.group(3)
+        else:
+            day_text, month_text, raw_name = match.group(4), match.group(5), match.group(6)
+
         month = MONTH_LOOKUP.get(month_text)
         if not month:
             continue
 
-        name = _normalize_name(re.split(r'\s+\|\s+|\s+Calendar generated on', raw_name)[0])
+        name = _normalize_name(html.unescape(re.sub(r'<[^>]+>', '', raw_name)))
         if not name:
             continue
 
@@ -111,9 +109,15 @@ def _fetch_intermin_holidays(year):
     response.raise_for_status()
 
     entries = []
-    for line in response.text.splitlines():
-        line = _normalize_name(line)
-        match = re.match(r'•\s*(\d{1,2})\.(\d{1,2})\.\s*(.+)', line)
+    # The site currently renders each flag day as "<li>3.2. Name...</li>",
+    # with no leading bullet character (older markup used a "•" prefix).
+    # Strip HTML entities/tags from each <li> and match the leading date.
+    for li_html in re.findall(r'<li[^>]*>(.*?)</li>', response.text, flags=re.DOTALL):
+        text = re.sub(r'<[^>]+>', ' ', li_html)
+        text = html.unescape(text)
+        line = _normalize_name(text)
+
+        match = re.match(r'(\d{1,2})\.(\d{1,2})\.\s*(.+)', line)
         if not match:
             continue
 
@@ -124,7 +128,7 @@ def _fetch_intermin_holidays(year):
         except ValueError:
             continue
 
-        name = _normalize_name(re.split(r'\s+\|\s+|\s+a recommended flag day', raw_name)[0])
+        name = _normalize_name(re.split(r'\s*\|\s*|\s+a recommended flag day', raw_name)[0])
         if not name:
             continue
 
@@ -140,21 +144,19 @@ def sync_holidays(db_path, today=None, mac_address=None):
     today = today or _current_local_datetime(db_path, mac_address).date()
     year = today.year
 
+    # Fetch each source independently so one source failing (e.g. a 403 from
+    # an anti-bot block) doesn't prevent the others from being stored.
+    entries = []
+    for fetcher in (_fetch_timeanddate_holidays, _fetch_intermin_holidays):
+        try:
+            entries.extend(fetcher(year))
+        except Exception as e:
+            print(f"Error fetching holidays via {fetcher.__name__}: {e}")
+
+    entries = _dedupe_entries(entries)
+
     try:
-        with sqlite3.connect(db_path) as conn:
-            _ensure_holiday_tables(conn)
-
-            entries = []
-            entries.extend(_fetch_timeanddate_holidays(year))
-            entries.extend(_fetch_intermin_holidays(year))
-            entries = _dedupe_entries(entries)
-
-            conn.execute('DELETE FROM holidays WHERE substr(date, 1, 4) = ?', (str(year),))
-            if entries:
-                conn.executemany(
-                    'INSERT OR REPLACE INTO holidays (date, name, source) VALUES (?, ?, ?)',
-                    entries,
-                )
+        replace_holidays_for_year(db_path, year, entries)
     except Exception as e:
         print(f"Error syncing holidays: {e}")
 
@@ -167,18 +169,7 @@ def get_today_holidays(db_path, today=None, mac_address=None):
     today_str = today.isoformat()
 
     try:
-        with sqlite3.connect(db_path) as conn:
-            _ensure_holiday_tables(conn)
-            rows = conn.execute(
-                'SELECT name FROM holidays WHERE date = ? ORDER BY source, name',
-                (today_str,)
-            ).fetchall()
-        names = []
-        for row in rows:
-            name = row[0]
-            if name and name not in names:
-                names.append(name)
-        return names
+        return get_holidays_for_date(db_path, today_str)
     except Exception as e:
         print(f"Error loading holidays for {today_str}: {e}")
         return []

@@ -1,6 +1,7 @@
 import sqlite3
 import time
 import json
+import secrets
 
 # Column order used whenever a full device row is read back out as a dict.
 DEVICE_COLUMNS = [
@@ -8,7 +9,21 @@ DEVICE_COLUMNS = [
     'last_filename', 'battery_voltage', 'fw_version', 'wifi_ssid', 'rssi', 'flip',
     'sleep_start', 'sleep_end', 'sleep_weekend', 'timezone', 'custom_url',
     'custom_text', 'playlist_index', 'api_key'
+    , 'refresh_lead_seconds', 'refresh_lead_samples'
 ]
+
+
+def normalize_mac(mac):
+    """Canonicalize a MAC address to uppercase, colon-separated form so the
+    same device is always keyed identically regardless of whether the client
+    sends 'AA:BB:CC:DD:EE:FF', 'aabbccddeeff', etc. Returns None for empty input."""
+    if not mac:
+        return None
+    cleaned = ''.join(ch for ch in str(mac).strip().upper() if ch in '0123456789ABCDEF')
+    if len(cleaned) != 12:
+        # Not a standard 48-bit MAC; return as-is (uppercased) to avoid data loss.
+        return str(mac).strip().upper()
+    return ':'.join(cleaned[i:i + 2] for i in range(0, 12, 2))
 
 
 def init_db(db_path):
@@ -39,6 +54,8 @@ def init_db(db_path):
             'ALTER TABLE devices ADD COLUMN playlist_index INTEGER DEFAULT 0',
             'ALTER TABLE devices ADD COLUMN api_key TEXT',
             'ALTER TABLE devices ADD COLUMN rssi TEXT',
+            'ALTER TABLE devices ADD COLUMN refresh_lead_seconds REAL DEFAULT 5',
+            'ALTER TABLE devices ADD COLUMN refresh_lead_samples INTEGER DEFAULT 0',
         ):
             try:
                 conn.execute(statement)
@@ -70,6 +87,17 @@ def init_db(db_path):
             )
         ''')
 
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS display_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mac_address TEXT,
+                request_headers TEXT,
+                response_body TEXT,
+                status_code INTEGER,
+                created_at TEXT
+            )
+        ''')
+
 
 def _row_to_device(row):
     if not row:
@@ -80,7 +108,7 @@ def _row_to_device(row):
 def get_device(db_path, mac_address):
     if not mac_address:
         return None
-    mac_address = mac_address.strip().upper()
+    mac_address = normalize_mac(mac_address)
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -107,7 +135,7 @@ def get_device_by_api_key(db_path, api_key):
 def device_exists(db_path, mac_address):
     if not mac_address:
         return False
-    mac_address = mac_address.strip().upper()
+    mac_address = normalize_mac(mac_address)
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT 1 FROM devices WHERE mac_address = ?', (mac_address,))
@@ -121,7 +149,7 @@ def register_device(db_path, mac_address, generated_api_key):
     api_key yet, `generated_api_key` is stored. Otherwise the existing
     api_key is left untouched. Returns the effective api_key.
     """
-    mac_address = mac_address.strip().upper()
+    mac_address = normalize_mac(mac_address)
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT api_key FROM devices WHERE mac_address = ?', (mac_address,))
@@ -138,12 +166,29 @@ def register_device(db_path, mac_address, generated_api_key):
         return generated_api_key
 
 
-def update_device_last_seen(db_path, mac_address, last_filename, battery, fw, ssid, refresh_rate, rssi=None, playlist_index=None):
+def update_device_last_seen(db_path, mac_address, last_filename, battery, fw, ssid, refresh_rate, rssi=None, playlist_index=None, observed_lead_seconds=None):
     if not mac_address:
         return
-    mac_address = mac_address.strip().upper()
+    mac_address = normalize_mac(mac_address)
     now_str = time.strftime('%Y-%m-%d %H:%M:%S')
     with sqlite3.connect(db_path) as conn:
+        if observed_lead_seconds is not None:
+            observed = min(30.0, max(1.0, float(observed_lead_seconds)))
+            row = conn.execute(
+                'SELECT refresh_lead_seconds, refresh_lead_samples FROM devices WHERE mac_address = ?',
+                (mac_address,)
+            ).fetchone()
+            old_lead = float(row[0]) if row and row[0] is not None else 5.0
+            samples = int(row[1]) if row and row[1] is not None else 0
+            # EWMA: recent observations matter more, while retaining history.
+            alpha = 0.25 if samples else 1.0
+            lead = old_lead + alpha * (observed - old_lead)
+            samples = min(samples + 1, 1000000)
+            conn.execute(
+                'UPDATE devices SET refresh_lead_seconds = ?, refresh_lead_samples = ? WHERE mac_address = ?',
+                (lead, samples, mac_address)
+            )
+
         if playlist_index is not None:
             conn.execute('''
                 UPDATE devices
@@ -156,6 +201,14 @@ def update_device_last_seen(db_path, mac_address, last_filename, battery, fw, ss
                 SET last_update = ?, last_filename = ?, battery_voltage = ?, fw_version = ?, wifi_ssid = ?, rssi = ?, refresh_rate = ?
                 WHERE mac_address = ?
             ''', (now_str, last_filename, battery, fw, ssid, rssi, refresh_rate, mac_address))
+
+
+def get_refresh_lead_seconds(db_path, mac_address, default=5.0):
+    value = get_device_field(db_path, mac_address, 'refresh_lead_seconds')
+    try:
+        return min(30.0, max(1.0, float(value))) if value is not None else default
+    except (TypeError, ValueError):
+        return default
 
 
 def get_device_location_timezone(db_path, mac_address):
@@ -178,9 +231,139 @@ def add_log_entries(db_path, mac_address, logs):
             )
 
 
+def log_display_request(db_path, mac_address, request_headers, response_body, status_code):
+    """Persist the headers/params received from a device on /api/display and
+    the JSON we sent back, for troubleshooting device-side fetch failures."""
+    now_str = time.strftime('%Y-%m-%d %H:%M:%S')
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            'INSERT INTO display_requests (mac_address, request_headers, response_body, status_code, created_at) VALUES (?, ?, ?, ?, ?)',
+            (mac_address, json.dumps(request_headers), json.dumps(response_body), status_code, now_str)
+        )
+
+
 def list_devices(db_path):
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT mac_address, name FROM devices ORDER BY name')
         rows = cursor.fetchall()
     return [{'mac_address': r[0], 'name': r[1] or r[0]} for r in rows]
+
+
+def get_device_field(db_path, mac_address, field):
+    """Fetch a single column for a device, e.g. 'timezone', 'location', 'name'.
+    Returns None if the device or the value doesn't exist."""
+    if not mac_address:
+        return None
+    mac_address = normalize_mac(mac_address)
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(f'SELECT {field} FROM devices WHERE mac_address = ?', (mac_address,))
+        row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def get_device_timezone(db_path, mac_address, default="Europe/Helsinki"):
+    return get_device_field(db_path, mac_address, 'timezone') or default
+
+
+def get_device_location(db_path, mac_address):
+    return get_device_field(db_path, mac_address, 'location')
+
+
+def get_device_name(db_path, mac_address):
+    return get_device_field(db_path, mac_address, 'name')
+
+
+def upsert_device_config(db_path, mac_address, name, location, playlist, refresh_rate,
+                          flip, sleep_start, sleep_end, sleep_weekend, timezone,
+                          custom_url, custom_text):
+    """Insert or update a device's full configuration, as submitted from the
+    /configure form."""
+    mac_address = normalize_mac(mac_address)
+    generated_api_key = secrets.token_urlsafe(16)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute('''
+            INSERT INTO devices (mac_address, name, location, playlist, refresh_rate, flip, sleep_start, sleep_end, sleep_weekend, timezone, custom_url, custom_text, api_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(mac_address) DO UPDATE SET
+            name=excluded.name, location=excluded.location, playlist=excluded.playlist, refresh_rate=excluded.refresh_rate,
+            flip=excluded.flip, sleep_start=excluded.sleep_start, sleep_end=excluded.sleep_end, sleep_weekend=excluded.sleep_weekend,
+            timezone=excluded.timezone, custom_url=excluded.custom_url, custom_text=excluded.custom_text,
+            api_key=COALESCE(devices.api_key, excluded.api_key)
+        ''', (mac_address, name, location, playlist, refresh_rate, flip, sleep_start, sleep_end, sleep_weekend, timezone, custom_url, custom_text, generated_api_key))
+
+
+def get_device_config_row(db_path, mac_address):
+    """Fetch the subset of device columns used to render the /configure form.
+    Returns a dict (with the same keys used previously as positional indices
+    0..15) or None if the device doesn't exist."""
+    if not mac_address:
+        return None
+    mac_address = normalize_mac(mac_address)
+    columns = [
+        'name', 'location', 'playlist', 'refresh_rate', 'last_update', 'last_filename',
+        'battery_voltage', 'fw_version', 'wifi_ssid', 'flip', 'sleep_start', 'sleep_end',
+        'sleep_weekend', 'timezone', 'custom_url', 'custom_text',
+    ]
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f'SELECT {", ".join(columns)} FROM devices WHERE mac_address = ?',
+            (mac_address,)
+        )
+        row = cursor.fetchone()
+    if not row:
+        return None
+    return dict(zip(columns, row))
+
+
+def ensure_holiday_tables(conn):
+    """Create the holidays table on an already-open connection if missing.
+    Exposed for callers that batch multiple statements on one connection."""
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS holidays (
+            date TEXT NOT NULL,
+            name TEXT NOT NULL,
+            source TEXT NOT NULL,
+            PRIMARY KEY (date, name, source)
+        )
+    ''')
+
+
+def replace_holidays_for_year(db_path, year, entries):
+    """Delete existing holiday rows for `year` and insert `entries`
+    (a list of (date, name, source) tuples)."""
+    with sqlite3.connect(db_path) as conn:
+        ensure_holiday_tables(conn)
+        conn.execute('DELETE FROM holidays WHERE substr(date, 1, 4) = ?', (str(year),))
+        if entries:
+            conn.executemany(
+                'INSERT OR REPLACE INTO holidays (date, name, source) VALUES (?, ?, ?)',
+                entries,
+            )
+
+
+def get_holidays_for_date(db_path, date_str):
+    """Return a de-duplicated, ordered list of holiday names for an ISO date string."""
+    with sqlite3.connect(db_path) as conn:
+        ensure_holiday_tables(conn)
+        rows = conn.execute(
+            'SELECT name FROM holidays WHERE date = ? ORDER BY source, name',
+            (date_str,)
+        ).fetchall()
+    names = []
+    for row in rows:
+        name = row[0]
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def get_events_raw(db_path):
+    """Return raw (event_time, title) rows from the events table, ordered."""
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            'SELECT event_time, title FROM events ORDER BY event_time ASC, title ASC'
+        ).fetchall()
+    return rows

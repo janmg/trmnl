@@ -4,10 +4,11 @@ import time
 import hashlib
 import secrets
 from datetime import datetime, timedelta
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from PIL import Image
-from flask import Flask, request, jsonify, send_from_directory, send_file, make_response
+from flask import Flask, request, jsonify, make_response
 
 from src.testcard import generate_testcard
 from src.schedule import generate_schedule, get_events
@@ -25,8 +26,11 @@ from src.db import (
     device_exists,
     register_device,
     update_device_last_seen,
+    get_refresh_lead_seconds,
     get_device_location_timezone,
     add_log_entries,
+    log_display_request,
+    normalize_mac,
 )
 
 app = Flask(__name__)
@@ -35,16 +39,41 @@ DB_PATH = 'trmnl.db'
 CONTENT_DIR = os.path.join(os.path.dirname(__file__), 'content')
 BASE_URL = 'https://trmnl.janmg.com'
 
-# How long before the whole minute the device should wake up to fetch its
-# next image (the ESP32 needs a moment to connect to wifi and refresh the
-# e-paper panel before the target minute actually arrives).
+# How long before the whole minute the device should wake up to fetch its next image (the ESP32 needs a moment to connect to wifi and refresh the e-paper panel before the target minute actually arrives).
 REFRESH_LEAD_SECONDS = 5
-# Never tell the device to come back sooner than this.
 MIN_REFRESH_SECONDS = 40
-# Upper bound for the "come back later" refresh rate handed out while the
-# device is inside its configured sleep window, so it can deep sleep for a
-# long stretch instead of polling every minute.
+# Upper bound for the "come back later" refresh rate handed out while the device is inside its configured sleep window, so it can deep sleep for a long stretch instead of polling every minute.
 MAX_SLEEP_REFRESH_SECONDS = 6 * 3600
+
+
+def _observed_refresh_lead(device, now_epoch):
+    """Estimate how late this poll arrived relative to the previous one."""
+    if not device or not device.get('last_update'):
+        return None
+    try:
+        previous = datetime.strptime(device['last_update'], '%Y-%m-%d %H:%M:%S').timestamp()
+        expected = float(device.get('refresh_rate') or 0)
+        if expected <= 0:
+            return None
+        return max(0.0, now_epoch - previous - expected)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+@app.after_request
+def _dedupe_response_headers(response):
+    """nginx (and other reverse proxies) reject responses that contain a
+    duplicated header such as 'Date' or 'Server'. The Flask dev server adds a
+    'Date' header itself, and send_file/send_from_directory add another one,
+    which produced 'upstream sent duplicate header line: "Date: ..."' and a
+    502 Bad Gateway on the device. De-duplicate those headers so the proxy
+    accepts the response."""
+    for header in ('Date', 'Server'):
+        values = response.headers.get_all(header)
+        if values and len(values) > 1:
+            # Keep only the first occurrence.
+            response.headers.set(header, values[0])
+    return response
 
 
 def _get_mac_from_request():
@@ -89,12 +118,28 @@ def _serve_image(buf, mac_address, cache_private=False):
     should_flip = _device_should_flip(mac_address)
     buf = apply_rotation(buf, should_flip)
 
-    resp = make_response(send_file(buf, mimetype='image/png'))
+    # Read the PNG bytes and return a plain Response. Using send_file() would make Werkzeug add its own Date/Last-Modified/ETag headers on top of the ones the dev server's http.server handler writes, producing a duplicated "Date" header that nginx rejects with a 502 Bad Gateway.
+    buf.seek(0)
+    data = buf.read()
+    resp = make_response(data, 200, {'Content-Type': 'image/png'})
     cache_control = 'no-store, no-cache, must-revalidate, max-age=0'
     if cache_private:
         cache_control += ', private'
     resp.headers['Cache-Control'] = cache_control
     return resp
+
+
+def _safe_generate(generator_fn, *args, **kwargs):
+    """Call a content generator and never let it raise: a device fetching an
+    image must always get back a valid PNG (falling back to the testcard via
+    _serve_image) rather than an HTTP 500, which the firmware would log as a
+    failed GET and never retry the same content again."""
+    try:
+        return generator_fn(*args, **kwargs)
+    except Exception as e:
+        if app.debug:
+            print(f"GENERATOR ERROR in {generator_fn.__name__}: {e}")
+        return None
 
 
 def align_refresh(now_epoch, interval_seconds, lead_seconds=0, tz_name=None):
@@ -195,10 +240,20 @@ def setup():
         }), 401
 
     friendly_id = normalized[-6:]
+    mac_address = normalize_mac(header_mac)
 
     key_alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
     candidate_key = ''.join(secrets.choice(key_alphabet) for _ in range(22))
-    api_key = register_device(DB_PATH, header_mac, candidate_key)
+    try:
+        api_key = register_device(DB_PATH, mac_address, candidate_key)
+    except Exception as e:
+        if app.debug:
+            print(f"SETUP ERROR for {mac_address}: {e}")
+        return jsonify({
+            "status": 500,
+            "title": "Internal Server Error",
+            "detail": "Failed to store device api_key."
+        }), 500
 
     response = jsonify({
         "status": 200,
@@ -223,7 +278,7 @@ def post_log():
     if device:
         mac_address = device.get('mac_address')
     elif header_mac:
-        mac_address = header_mac.strip().upper()
+        mac_address = normalize_mac(header_mac)
     else:
         mac_address = 'UNKNOWN'
 
@@ -244,14 +299,14 @@ def get_display():
     ssid = request.headers.get('Wifi-Ssid', '-')
     rssi = request.headers.get('Rssi') or request.headers.get('RSSI') or '-'
 
-    # The api_key is the primary way we identify a provisioned device; the
-    # MAC (ID header) is only used as a fallback to drive the registration
-    # flow for devices that haven't completed /api/setup yet.
+    # The api_key is the primary way we identify a provisioned device, but some firmware/proxy combinations send an empty or missing Access-Token header (see README capture: 'Access-Token': ''). Fall back to looking the device up by its MAC (ID header) so a configured playlist is still honored instead of silently dropping to the unregistered/testcard path.
     device = get_device_by_api_key(DB_PATH, access_token) if access_token else None
+    if not device and header_mac:
+        device = get_device(DB_PATH, header_mac)
     if device:
         mac_address = device.get('mac_address')
     elif header_mac:
-        mac_address = header_mac.strip().upper()
+        mac_address = normalize_mac(header_mac)
     else:
         mac_address = None
 
@@ -265,6 +320,10 @@ def get_display():
     now_epoch = time.time()
     forced_refresh = None
     next_playlist_index = None
+    observed_refresh_lead = None
+    refresh_lead_seconds = REFRESH_LEAD_SECONDS
+    # Percent-encode the MAC so it's a safe query-string value: raw colons in a URL can trip up minimal embedded HTTP/TLS clients (this was found to be the cause of persistent "[HTTPS] GET ... failed" errors on-device).
+    mac_q = quote(mac_address, safe='')
 
     try:
         if not device:
@@ -279,6 +338,8 @@ def get_display():
         sleep_end = device.get('sleep_end') or ""
         sleep_weekend = device.get('sleep_weekend') or 0
         device_timezone = device.get('timezone') or "Europe/Helsinki"
+        refresh_lead_seconds = get_refresh_lead_seconds(DB_PATH, mac_address, REFRESH_LEAD_SECONDS)
+        observed_refresh_lead = _observed_refresh_lead(device, now_epoch)
 
         try:
             corrected_dt = datetime.fromtimestamp(now_epoch, tz=ZoneInfo(device_timezone))
@@ -297,55 +358,60 @@ def get_display():
         content_state = ""
 
         if item == "schedule":
-            image_url = f"{BASE_URL}/schedule?mac_address={mac_address}"
-            filename = "schedule.png"
+            image_url = f"{BASE_URL}/schedule?mac_address={mac_q}"
             events_hash = hashlib.md5(str(get_events()).encode('utf-8')).hexdigest()
             content_state = f"{events_hash}-{corrected_dt.strftime('%Y-%m-%d-%H')}"
         elif item == "clock":
-            image_url = f"{BASE_URL}/clock?mac_address={mac_address}"
-            filename = "clock.png"
+            image_url = f"{BASE_URL}/clock?mac_address={mac_q}"
             refresh_rate = 60
             next_minute = ((int(now_epoch) // 60) + 1) * 60
             content_state = f"clock-{next_minute}"
-            forced_refresh = max(1, int(next_minute - now_epoch))
+            forced_refresh = max(MIN_REFRESH_SECONDS, int(next_minute - now_epoch - refresh_lead_seconds))
         elif item == "xkcd":
-            image_url = f"{BASE_URL}/xkcd?mac_address={mac_address}"
-            filename = "xkcd.png"
+            image_url = f"{BASE_URL}/xkcd?mac_address={mac_q}"
             content_state = f"xkcd-{corrected_dt.strftime('%Y-%m-%d-%H')}"
         elif item == "fmi":
-            image_url = f"{BASE_URL}/fmi?mac_address={mac_address}"
-            filename = "fmi.png"
+            image_url = f"{BASE_URL}/fmi?mac_address={mac_q}"
             minute_bucket = (corrected_dt.minute // 15) * 15
             content_state = f"fmi-{corrected_dt.strftime('%Y%m%d%H')}{minute_bucket}"
         elif item == "weather":
-            image_url = f"{BASE_URL}/weather?mac_address={mac_address}"
-            filename = "weather.png"
+            image_url = f"{BASE_URL}/weather?mac_address={mac_q}"
             content_state = f"weather-{corrected_dt.strftime('%Y-%m-%d-%H')}"
         elif item == "map":
-            image_url = f"{BASE_URL}/map?mac_address={mac_address}"
-            filename = "map.png"
+            image_url = f"{BASE_URL}/map?mac_address={mac_q}"
             content_state = f"map-{corrected_dt.strftime('%Y-%m-%d-%H')}"
         elif item == "custom_url" and custom_url:
             image_url = custom_url
-            filename = "custom_url.png"
             content_state = f"custom-{corrected_dt.strftime('%Y-%m-%d-%H')}"
         elif item == "custom_text" and custom_text:
-            image_url = f"{BASE_URL}/text?mac_address={mac_address}"
-            filename = "titlecard.png"
+            image_url = f"{BASE_URL}/text?mac_address={mac_q}"
             content_state = f"text-{hashlib.md5(custom_text.encode('utf-8')).hexdigest()}"
         elif item == "testcard":
-            image_url = f"{BASE_URL}/testcard?mac_address={mac_address}"
-            filename = "testcard.png"
+            image_url = f"{BASE_URL}/testcard?mac_address={mac_q}"
             content_state = f"testcard-{corrected_dt.strftime('%Y-%m-%d-%H')}"
         else:
             # Static PNG stored in the content directory.
-            image_url = f"{BASE_URL}/content/{item}.png?mac_address={mac_address}"
-            filename = f"{item}.png"
+            image_url = f"{BASE_URL}/content/{item}.png?mac_address={mac_q}"
             try:
                 mtime = os.path.getmtime(os.path.join(CONTENT_DIR, f"{item}.png"))
-                content_state = f"{mtime}"
+                content_state = f"{item}-{int(mtime)}"
             except OSError:
-                content_state = "missing"
+                content_state = f"{item}-missing"
+
+        # The TRMNL firmware decides whether to re-download and redraw the
+        # e-paper display based purely on this "filename" string: if a file
+        # with that exact name already exists in its local flash cache, it
+        # skips the download AND the redraw entirely (see checkCurrentFileName
+        # / DisplayedImage::matches in the firmware). A filename that never
+        # changes (e.g. always "clock.png") means the device will fetch the
+        # image once and then never update it again, no matter how often it
+        # polls or how much refresh_rate/ETag says otherwise. Deriving the
+        # filename from content_state guarantees it changes exactly when the
+        # rendered content actually changes. Hash it (rather than embedding
+        # content_state directly) to keep the name short and safe for the
+        # firmware's 31-character SPIFFS filename limit.
+        state_hash = hashlib.md5(content_state.encode('utf-8')).hexdigest()[:10]
+        filename = f"{item}-{state_hash}.png"
 
     except Exception as e:
         if app.debug:
@@ -353,7 +419,7 @@ def get_display():
         # Unregistered device, no playlist, or any other error: fall back to
         # the testcard and poll again soon (this also drives new devices
         # towards the /configure registration flow).
-        image_url = f"{BASE_URL}/testcard?mac_address={mac_address}"
+        image_url = f"{BASE_URL}/testcard?mac_address={mac_q}"
         filename = "testcard.png"
         refresh_rate = 60
         content_state = "unregistered"
@@ -370,7 +436,7 @@ def get_display():
     elif is_device_sleeping(corrected_dt, sleep_start, sleep_end, sleep_weekend):
         next_refresh = seconds_until_awake(corrected_dt, sleep_start, sleep_end, sleep_weekend)
     else:
-        next_refresh = align_refresh(now_epoch, refresh_rate, REFRESH_LEAD_SECONDS, device_timezone)
+        next_refresh = align_refresh(now_epoch, refresh_rate, refresh_lead_seconds, device_timezone)
 
     response_data = {
         "filename": filename,
@@ -387,16 +453,31 @@ def get_display():
         "update_firmware": False
     }
 
-    # The ETag lets the (modified) firmware decide whether the screen
-    # actually needs to be redrawn without re-downloading the image.
+    # The ETag lets the (modified) firmware decide whether the screen actually needs to be redrawn without re-downloading the image.
     day_string = corrected_dt.strftime('%Y-%m-%d')
     etag_content = f"{filename}-{image_url}-{day_string}-{content_state}-{int(bool(should_flip))}"
     etag = hashlib.md5(etag_content.encode('utf-8')).hexdigest()
 
+    # Record everything the device sent us and everything we sent back, so device-reported fetch failures can be correlated with what the server actually told it to do.
+    request_headers = {
+        'ID': header_mac,
+        'Access-Token': access_token,
+        'Battery-Voltage': battery,
+        'Fw-Version': fw,
+        'Wifi-Ssid': ssid,
+        'Rssi': rssi,
+        'If-None-Match': request.headers.get('If-None-Match'),
+    }
+
     if request.if_none_match and etag in request.if_none_match:
+        log_display_request(DB_PATH, mac_address, request_headers, {"status": 304}, 304)
         return '', 304
 
-    update_device_last_seen(DB_PATH, mac_address, filename, battery, fw, ssid, next_refresh, rssi, next_playlist_index)
+    update_device_last_seen(
+        DB_PATH, mac_address, filename, battery, fw, ssid, next_refresh, rssi,
+        next_playlist_index, observed_refresh_lead
+    )
+    log_display_request(DB_PATH, mac_address, request_headers, response_data, 200)
 
     resp = make_response(jsonify(response_data))
     resp.set_etag(etag)
@@ -417,27 +498,31 @@ def serve_content(filename):
     mac_address = _get_mac_from_request()
     should_flip = _device_should_flip(mac_address)
 
-    if should_flip:
-        with open(filepath, 'rb') as f:
-            buf = io.BytesIO(f.read())
-        buf = apply_rotation(buf, True)
-        return send_file(buf, mimetype='image/png')
+    with open(filepath, 'rb') as f:
+        buf = io.BytesIO(f.read())
 
-    return send_from_directory(CONTENT_DIR, filename)
+    if should_flip:
+        buf = apply_rotation(buf, True)
+
+    # Serve raw bytes via a plain Response (not send_file/send_from_directory)
+    # so Werkzeug does not add a second Date/Last-Modified/ETag header that
+    # would duplicate the dev server's own Date and trigger a 502 at nginx.
+    buf.seek(0)
+    return make_response(buf.read(), 200, {'Content-Type': 'image/png'})
 
 
 @app.route('/schedule')
 def get_schedule():
     mac_address = _get_mac_from_request()
     is_generic = not (mac_address and device_exists(DB_PATH, mac_address))
-    buf = generate_schedule(is_generic=is_generic, mac_address=mac_address)
+    buf = _safe_generate(generate_schedule, is_generic=is_generic, mac_address=mac_address)
     return _serve_image(buf, mac_address)
 
 
 @app.route('/testcard')
 def get_testcard():
-    mac_address = _get_mac_from_request()
     device_info = {}
+    mac_address = _get_mac_from_request()
     if mac_address:
         dev = get_device(DB_PATH, mac_address)
         if dev:
@@ -459,21 +544,21 @@ def get_testcard():
                 "ssid": request.headers.get('Wifi-Ssid', '-')
             }
 
-    buf = generate_testcard(mac_address, device_info=device_info)
+    buf = _safe_generate(generate_testcard, mac_address, device_info=device_info)
     return _serve_image(buf, mac_address)
 
 
 @app.route('/xkcd')
 def get_xkcd():
     mac_address = _get_mac_from_request()
-    buf = generate_xkcd()
+    buf = _safe_generate(generate_xkcd)
     return _serve_image(buf, mac_address)
 
 
 @app.route('/fmi')
 def get_fmi():
     mac_address = _get_mac_from_request()
-    buf = generate_fmi()
+    buf = _safe_generate(generate_fmi)
     return _serve_image(buf, mac_address)
 
 
@@ -490,21 +575,21 @@ def get_weather():
         if tz:
             tz_name = tz
 
-    buf = generate_weather(coords=coords, device_tz_name=tz_name)
+    buf = _safe_generate(generate_weather, coords=coords, device_tz_name=tz_name)
     return _serve_image(buf, mac_address)
 
 
 @app.route('/map')
 def get_map():
     mac_address = _get_mac_from_request()
-    buf = generate_map(DB_PATH, mac_address)
+    buf = _safe_generate(generate_map, DB_PATH, mac_address)
     return _serve_image(buf, mac_address)
 
 
 @app.route('/clock')
 def get_clock():
     mac_address = _get_mac_from_request()
-    buf = generate_clock(DB_PATH, mac_address)
+    buf = _safe_generate(generate_clock, DB_PATH, mac_address)
     return _serve_image(buf, mac_address, cache_private=True)
 
 
@@ -518,11 +603,13 @@ def get_text():
         if dev and dev.get('custom_text'):
             text = dev.get('custom_text')
 
-    buf = generate_titlecard(text)
+    buf = _safe_generate(generate_titlecard, text)
     return _serve_image(buf, mac_address)
 
 
+# consider WSGI server (e.g. gunicorn 'trmnl:app'), where __main__ is never executed and the schema would otherwise never be created/upgraded.
+init_db(DB_PATH)
+
 if __name__ == '__main__':
-    init_db(DB_PATH)
     # Run the app on all interfaces at port 5002
     app.run(host='0.0.0.0', port=5002, debug=True)
