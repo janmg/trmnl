@@ -57,10 +57,57 @@ def lookup_coordinates_and_timezone(location_str):
 
     return coords, tz_name
 
+def render_device_list(db_path):
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT mac_address, name FROM devices ORDER BY name')
+        rows = cursor.fetchall()
+
+    devices = [{"mac_address": r[0], "name": r[1] or r[0]} for r in rows]
+
+    html = '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>TRMNL | Devices</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background:#f8fafc; margin:0; padding:2rem 1rem; }
+            .container { max-width: 640px; margin: 0 auto; background:#fff; border-radius:12px; padding:2rem; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); }
+            h1 { margin-top:0; font-size:1.5rem; border-bottom:2px solid #e2e8f0; padding-bottom:0.5rem; }
+            ul { list-style:none; padding:0; margin:0; }
+            li { border-bottom:1px solid #e2e8f0; padding:0.75rem 0; display:flex; justify-content:space-between; align-items:center; }
+            a { color:#2563eb; text-decoration:none; font-weight:600; }
+            .mac { font-family: monospace; color:#64748b; }
+            .empty { color:#64748b; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Registered Devices</h1>
+            {% if devices %}
+            <ul>
+                {% for d in devices %}
+                <li>
+                    <a href="/configure?mac_address={{ d.mac_address }}">{{ d.name }}</a>
+                    <span class="mac">{{ d.mac_address }}</span>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="empty">No devices registered yet.</p>
+            {% endif %}
+        </div>
+    </body>
+    </html>
+    '''
+    return render_template_string(html, devices=devices)
+
+
 def handle_register(db_path, content_dir):
     mac_address = request.args.get('mac_address') or request.form.get('mac_address')
     if not mac_address:
-        return "MAC Address required", 400
+        return render_device_list(db_path)
     
     mac_address = mac_address.upper()
     message = ""
@@ -77,7 +124,7 @@ def handle_register(db_path, content_dir):
         name = request.form.get('name')
         location_raw = request.form.get('location', '').strip()
         location, tz_name = lookup_coordinates_and_timezone(location_raw)
-        refresh_min = int(request.form.get('refresh_rate', 15))
+        refresh_min = int(request.form.get('refresh_rate', 1))
         refresh_sec = refresh_min * 60
         flip = 1 if request.form.get('flip') else 0
         sleep_start = request.form.get('sleep_start', '').strip()
@@ -97,7 +144,7 @@ def handle_register(db_path, content_dir):
                 timezone=excluded.timezone, custom_url=excluded.custom_url, custom_text=excluded.custom_text
             ''', (mac_address, name or f"Device {mac_address[-5:]}", location, playlist_str, refresh_sec, flip, sleep_start, sleep_end, sleep_weekend, tz_name, custom_url, custom_text))
         
-        message = f"Device {mac_address} updated! Timezone: {tz_name}"
+        message = f"Device {mac_address} updated!"
         current_timezone = tz_name
         current_location = location
 
@@ -112,6 +159,32 @@ def handle_register(db_path, content_dir):
             current_playlist = row[2].split(',') if row[2] else []
             current_refresh_min = (row[3] or 900) // 60
             last_update = row[4] or "Never"
+            try:
+                from datetime import datetime, timedelta
+                from zoneinfo import ZoneInfo
+
+                refresh_secs = int(row[3]) if row[3] else 60
+                tz = row[13] or 'Europe/Helsinki'
+
+                if last_update and last_update != "Never":
+                    # Interpret stored `last_update` as the device-local time
+                    # (stored without TZ suffix). Make it timezone-aware so
+                    # additions and formatting use the correct timezone.
+                    lu_dt = datetime.strptime(last_update, '%Y-%m-%d %H:%M:%S')
+                    try:
+                        lu_dt = lu_dt.replace(tzinfo=ZoneInfo(tz))
+                    except Exception:
+                        lu_dt = lu_dt
+
+                    next_dt = lu_dt + timedelta(seconds=refresh_secs)
+                    try:
+                        next_update = next_dt.astimezone(ZoneInfo(tz)).strftime('%Y-%m-%d %H:%M:%S')
+                    except Exception:
+                        next_update = next_dt.strftime('%Y-%m-%d %H:%M:%S')
+                else:
+                    next_update = "Unknown"
+            except Exception:
+                next_update = "Unknown"
             last_filename = row[5] or "None"
             battery = row[6] or "-"
             fw_version = row[7] or "-"
@@ -140,6 +213,7 @@ def handle_register(db_path, content_dir):
             current_timezone = "Europe/Helsinki"
             current_custom_url = ""
             current_custom_text = ""
+            next_update = "Unknown"
 
     mac_encoded = quote(mac_address, safe='')
     preview_items = []
@@ -370,6 +444,7 @@ def handle_register(db_path, content_dir):
                         <div class="status-box">
                             <div class="status-item"><span class="status-label">MAC Address:</span> <span class="mac-badge">{{ mac_address }}</span></div>
                             <div class="status-item"><span class="status-label">Last Update:</span> {{ last_update }}</div>
+                            <div class="status-item"><span class="status-label">Next Update:</span> {{ next_update }}</div>
                             <div class="status-item"><span class="status-label">Last File:</span> {{ last_filename }}</div>
                             <div class="status-item"><span class="status-label">Status:</span> {{ battery }}V | {{ fw_version }} | {{ wifi_ssid }}</div>
                         </div>
@@ -498,6 +573,7 @@ def handle_register(db_path, content_dir):
                                   preview_items=preview_items,
                                   refresh_options=refresh_options, current_refresh_min=current_refresh_min,
                                   message=message, last_update=last_update, last_filename=last_filename,
+                                  next_update=next_update,
                                   battery=battery, fw_version=fw_version, wifi_ssid=wifi_ssid,
                                   current_location=current_location,
                                   current_flip=current_flip, 
