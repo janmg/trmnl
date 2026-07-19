@@ -3,6 +3,7 @@ import io
 import time
 import hashlib
 import secrets
+import threading
 from datetime import datetime, timedelta
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -33,6 +34,8 @@ from src.db import (
     add_log_entries,
     log_display_request,
     normalize_mac,
+    cleanup_old_display_requests,
+    cleanup_past_events,
 )
 
 app = Flask(__name__)
@@ -47,6 +50,30 @@ REFRESH_LEAD_SECONDS = 5
 MAX_SLEEP_REFRESH_SECONDS = 6 * 3600
 
 
+def _cleanup_scheduler():
+    """Run cleanup of old display requests and past events every midnight."""
+    while True:
+        # Calculate seconds until next midnight
+        now = datetime.now()
+        tomorrow = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        seconds_until_midnight = (tomorrow - now).total_seconds()
+        
+        # Sleep until midnight
+        time.sleep(seconds_until_midnight)
+        
+        # Run cleanup
+        try:
+            cleanup_old_display_requests(DB_PATH)
+            cleanup_past_events(DB_PATH)
+        except Exception as e:
+            print(f"Error in cleanup scheduler: {e}")
+
+
+# Start the cleanup scheduler in a background thread
+_cleanup_thread = threading.Thread(target=_cleanup_scheduler, daemon=True)
+_cleanup_thread.start()
+
+
 def _observed_refresh_lead(device, now_epoch):
     """Estimate how late this poll arrived relative to the previous one."""
     if not device or not device.get('last_update'):
@@ -59,7 +86,6 @@ def _observed_refresh_lead(device, now_epoch):
         return max(0.0, now_epoch - previous - expected)
     except (TypeError, ValueError, OverflowError):
         return None
-
 
 @app.after_request
 def _dedupe_response_headers(response):
@@ -76,19 +102,16 @@ def _dedupe_response_headers(response):
             response.headers.set(header, values[0])
     return response
 
-
 def _get_mac_from_request():
     """Identify the device from a mac_address query param or the ID/Id header."""
     mac = request.args.get('mac_address') or request.headers.get('ID') or request.headers.get('Id')
     return mac.strip().upper() if mac else None
-
 
 def _device_should_flip(mac_address):
     if not mac_address:
         return False
     dev = get_device(DB_PATH, mac_address)
     return bool(dev and dev.get('flip'))
-
 
 def apply_rotation(buf, should_flip):
     """Rotate a PNG 180 degrees via Pillow into a new BytesIO buffer."""
@@ -109,7 +132,6 @@ def apply_rotation(buf, should_flip):
         buf.seek(0)
         return buf
 
-
 def _serve_image(buf, mac_address, cache_private=False):
     """Apply device rotation, set no-cache headers, and send a PNG buffer.
     Falls back to the testcard if the generator failed to produce an image."""
@@ -129,7 +151,6 @@ def _serve_image(buf, mac_address, cache_private=False):
     resp.headers['Cache-Control'] = cache_control
     return resp
 
-
 def _safe_generate(generator_fn, *args, **kwargs):
     """Call a content generator and never let it raise: a device fetching an
     image must always get back a valid PNG (falling back to the testcard via
@@ -141,10 +162,6 @@ def _safe_generate(generator_fn, *args, **kwargs):
         if app.debug:
             print(f"GENERATOR ERROR in {generator_fn.__name__}: {e}")
         return None
-
-
-
-
 
 def is_device_sleeping(dt, sleep_start, sleep_end, sleep_weekend):
     if sleep_weekend and dt.weekday() >= 5:
@@ -167,7 +184,6 @@ def is_device_sleeping(dt, sleep_start, sleep_end, sleep_weekend):
     except Exception:
         return False
 
-
 def seconds_until_awake(dt, sleep_start, sleep_end, sleep_weekend):
     """How long the device can stay in deep sleep, capped at MAX_SLEEP_REFRESH_SECONDS."""
     if sleep_weekend and dt.weekday() >= 5:
@@ -184,7 +200,6 @@ def seconds_until_awake(dt, sleep_start, sleep_end, sleep_weekend):
 
     seconds = int((target - dt).total_seconds())
     return min(max(seconds, MIN_REFRESH_SECONDS), MAX_SLEEP_REFRESH_SECONDS)
-
 
 @app.route('/api/setup', methods=['GET'])
 def setup():
@@ -245,9 +260,7 @@ def post_log():
     payload = request.get_json(silent=True) or {}
     logs = payload.get('logs', []) if isinstance(payload, dict) else []
     add_log_entries(DB_PATH, mac_address, logs)
-
     return '', 204
-
 
 @app.route('/api/display', methods=['GET'])
 def get_display():
@@ -435,11 +448,9 @@ def get_display():
     resp.set_etag(etag)
     return resp
 
-
 @app.route('/configure', methods=['GET', 'POST'])
 def configure():
     return handle_register(DB_PATH, CONTENT_DIR)
-
 
 @app.route('/content/<path:filename>')
 def serve_content(filename):
@@ -462,14 +473,12 @@ def serve_content(filename):
     buf.seek(0)
     return make_response(buf.read(), 200, {'Content-Type': 'image/png'})
 
-
 @app.route('/schedule')
 def get_schedule():
     mac_address = _get_mac_from_request()
     is_generic = not (mac_address and device_exists(DB_PATH, mac_address))
     buf = _safe_generate(generate_schedule, is_generic=is_generic, mac_address=mac_address)
     return _serve_image(buf, mac_address)
-
 
 @app.route('/testcard')
 def get_testcard():
@@ -499,20 +508,17 @@ def get_testcard():
     buf = _safe_generate(generate_testcard, mac_address, device_info=device_info)
     return _serve_image(buf, mac_address)
 
-
 @app.route('/xkcd')
 def get_xkcd():
     mac_address = _get_mac_from_request()
     buf = _safe_generate(generate_xkcd)
     return _serve_image(buf, mac_address)
 
-
 @app.route('/fmi')
 def get_fmi():
     mac_address = _get_mac_from_request()
     buf = _safe_generate(generate_fmi)
     return _serve_image(buf, mac_address)
-
 
 @app.route('/weather')
 def get_weather():
@@ -530,20 +536,17 @@ def get_weather():
     buf = _safe_generate(generate_weather, coords=coords, device_tz_name=tz_name)
     return _serve_image(buf, mac_address)
 
-
 @app.route('/map')
 def get_map():
     mac_address = _get_mac_from_request()
     buf = _safe_generate(generate_map, DB_PATH, mac_address)
     return _serve_image(buf, mac_address)
 
-
 @app.route('/clock')
 def get_clock():
     mac_address = _get_mac_from_request()
     buf = _safe_generate(generate_clock, DB_PATH, mac_address)
     return _serve_image(buf, mac_address, cache_private=True)
-
 
 @app.route('/text')
 def get_text():
@@ -558,12 +561,10 @@ def get_text():
     buf = _safe_generate(generate_titlecard, text)
     return _serve_image(buf, mac_address)
 
-
 @app.route('/logs')
 def logs_endpoint():
     """Display the last display request/response and device log for a device in pretty HTML."""
     return get_logs(DB_PATH)
-
 
 # consider WSGI server (e.g. gunicorn 'trmnl:app'), where __main__ is never executed and the schema would otherwise never be created/upgraded.
 init_db(DB_PATH)

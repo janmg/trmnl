@@ -2,6 +2,7 @@ import sqlite3
 import time
 import json
 import secrets
+import datetime
 
 # Column order used whenever a full device row is read back out as a dict.
 DEVICE_COLUMNS = [
@@ -425,3 +426,63 @@ def delete_device(db_path, mac_address):
     except Exception as e:
         print(f"Error deleting device {mac_address}: {e}")
         return False
+
+
+def cleanup_old_display_requests(db_path):
+    """Delete display_requests older than 1 day, except the latest entry for each mac_address."""
+    try:
+        with sqlite3.connect(db_path) as conn:
+            # Get the current time minus 1 day
+            now = time.time()
+            one_day_ago = now - (24 * 3600)
+            one_day_ago_str = datetime.datetime.fromtimestamp(one_day_ago).isoformat()
+            
+            # Find all display_requests older than 1 day, grouped by mac_address
+            # and exclude the latest one for each mac_address
+            cursor = conn.execute('''
+                DELETE FROM display_requests
+                WHERE id IN (
+                    SELECT id FROM display_requests
+                    WHERE created_at < ?
+                    AND id NOT IN (
+                        SELECT MAX(id) FROM display_requests
+                        GROUP BY mac_address
+                    )
+                )
+            ''', (one_day_ago_str,))
+            
+            deleted_count = cursor.rowcount
+            conn.commit()
+            
+            if deleted_count > 0:
+                print(f"Cleaned up {deleted_count} old display requests")
+            
+            return deleted_count
+    except Exception as e:
+        print(f"Error cleaning up display requests: {e}")
+        return 0
+
+
+def cleanup_past_events(db_path):
+    """Delete events from the events table that have already passed."""
+    try:
+        with sqlite3.connect(db_path) as conn:
+            # Get the current datetime
+            now = datetime.datetime.now().isoformat()
+            
+            # Delete all events with event_time in the past
+            cursor = conn.execute(
+                'DELETE FROM events WHERE event_time < ?',
+                (now,)
+            )
+            
+            deleted_count = cursor.rowcount
+            conn.commit()
+            
+            if deleted_count > 0:
+                print(f"Cleaned up {deleted_count} past events")
+            
+            return deleted_count
+    except Exception as e:
+        print(f"Error cleaning up past events: {e}")
+        return 0
