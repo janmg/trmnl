@@ -35,7 +35,8 @@ def _current_local_datetime(db_path=None, mac_address=None):
             tz_name = get_device_timezone(db_path, mac_address, default=tz_name)
         except Exception:
             pass
-    return datetime.now(ZoneInfo(tz_name))
+    # Add 20 seconds to account for refresh delay
+    return datetime.now(ZoneInfo(tz_name)) + timedelta(seconds=20)
 
 
 def _normalize_name(name):
