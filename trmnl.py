@@ -19,6 +19,8 @@ from src.map import generate_map
 from src.titlecard import generate_titlecard
 from src.clock import generate_clock
 from src.configure import handle_register
+from src.logs import get_logs
+from src.timing import align_refresh, MIN_REFRESH_SECONDS
 from src.db import (
     init_db,
     get_device,
@@ -41,7 +43,6 @@ BASE_URL = 'https://trmnl.janmg.com'
 
 # How long before the whole minute the device should wake up to fetch its next image (the ESP32 needs a moment to connect to wifi and refresh the e-paper panel before the target minute actually arrives).
 REFRESH_LEAD_SECONDS = 5
-MIN_REFRESH_SECONDS = 40
 # Upper bound for the "come back later" refresh rate handed out while the device is inside its configured sleep window, so it can deep sleep for a long stretch instead of polling every minute.
 MAX_SLEEP_REFRESH_SECONDS = 6 * 3600
 
@@ -142,48 +143,7 @@ def _safe_generate(generator_fn, *args, **kwargs):
         return None
 
 
-def align_refresh(now_epoch, interval_seconds, lead_seconds=0, tz_name=None):
-    """
-    Compute seconds until the next aligned refresh.
 
-    - When `interval_seconds` is a whole number of minutes, align to the next
-      multiple-of-interval minute boundary (in the device's local timezone),
-      minus `lead_seconds` so the device wakes slightly early.
-    - Otherwise, fall back to aligning to epoch multiples of `interval_seconds`.
-    - The result is never allowed to be less than `MIN_REFRESH_SECONDS`.
-    """
-    interval = max(1, int(interval_seconds or 1))
-    lead = max(0, int(lead_seconds or 0))
-
-    try:
-        now_dt = datetime.fromtimestamp(now_epoch, tz=ZoneInfo(tz_name)) if tz_name else datetime.fromtimestamp(now_epoch)
-    except Exception:
-        now_dt = datetime.fromtimestamp(now_epoch)
-
-    if interval % 60 == 0:
-        interval_min = interval // 60
-        minutes_since_midnight = now_dt.hour * 60 + now_dt.minute
-        next_minutes = ((minutes_since_midnight // interval_min) + 1) * interval_min
-
-        midnight = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
-        next_boundary_dt = midnight + timedelta(minutes=next_minutes)
-        target_dt = next_boundary_dt - timedelta(seconds=lead)
-
-        if target_dt.timestamp() <= now_epoch:
-            next_boundary_dt += timedelta(minutes=interval_min)
-            target_dt = next_boundary_dt - timedelta(seconds=lead)
-
-        seconds = int(target_dt.timestamp() - now_epoch)
-    else:
-        next_boundary = ((int(now_epoch) // interval) + 1) * interval
-        target = next_boundary - lead
-        if target <= now_epoch:
-            target += interval
-        seconds = int(target - now_epoch)
-
-    if seconds < MIN_REFRESH_SECONDS:
-        seconds += 60
-    return seconds
 
 
 def is_device_sleeping(dt, sleep_start, sleep_end, sleep_weekend):
@@ -363,10 +323,9 @@ def get_display():
             content_state = f"{events_hash}-{corrected_dt.strftime('%Y-%m-%d-%H')}"
         elif item == "clock":
             image_url = f"{BASE_URL}/clock?mac_address={mac_q}"
-            refresh_rate = 60
-            next_minute = ((int(now_epoch) // 60) + 1) * 60
-            content_state = f"clock-{next_minute}"
-            forced_refresh = max(MIN_REFRESH_SECONDS, int(next_minute - now_epoch - refresh_lead_seconds))
+            # Use align_refresh to compute the next clock boundary and when to fetch it
+            forced_refresh, next_boundary = align_refresh(now_epoch, refresh_rate, refresh_lead_seconds, device_timezone, for_clock=True)
+            content_state = f"clock-{next_boundary.strftime('%Y-%m-%d-%H%M')}"
         elif item == "xkcd":
             image_url = f"{BASE_URL}/xkcd?mac_address={mac_q}"
             content_state = f"xkcd-{corrected_dt.strftime('%Y-%m-%d-%H')}"
@@ -398,18 +357,11 @@ def get_display():
             except OSError:
                 content_state = f"{item}-missing"
 
-        # The TRMNL firmware decides whether to re-download and redraw the
-        # e-paper display based purely on this "filename" string: if a file
-        # with that exact name already exists in its local flash cache, it
-        # skips the download AND the redraw entirely (see checkCurrentFileName
-        # / DisplayedImage::matches in the firmware). A filename that never
-        # changes (e.g. always "clock.png") means the device will fetch the
-        # image once and then never update it again, no matter how often it
-        # polls or how much refresh_rate/ETag says otherwise. Deriving the
-        # filename from content_state guarantees it changes exactly when the
-        # rendered content actually changes. Hash it (rather than embedding
-        # content_state directly) to keep the name short and safe for the
-        # firmware's 31-character SPIFFS filename limit.
+        # The TRMNL firmware decides whether to re-download and redraw the e-paper display based purely on this "filename" string:
+        # if a file with that exact name already exists in its local flash cache, it skips the download and redraw
+        # (see checkCurrentFileName / DisplayedImage::matches in the firmware).
+        # Deriving the filename from content_state guarantees the filename changes content actually changes.
+        # Using a hash keeps the name short and safe for the firmware's 31-character SPIFFS filename limit.
         state_hash = hashlib.md5(content_state.encode('utf-8')).hexdigest()[:10]
         filename = f"{item}-{state_hash}.png"
 
@@ -605,6 +557,12 @@ def get_text():
 
     buf = _safe_generate(generate_titlecard, text)
     return _serve_image(buf, mac_address)
+
+
+@app.route('/logs')
+def logs_endpoint():
+    """Display the last display request/response and device log for a device in pretty HTML."""
+    return get_logs(DB_PATH)
 
 
 # consider WSGI server (e.g. gunicorn 'trmnl:app'), where __main__ is never executed and the schema would otherwise never be created/upgraded.

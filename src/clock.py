@@ -43,13 +43,47 @@ def _normalize_name(name):
 
 
 def _dedupe_entries(entries):
-    seen = set()
-    deduped = []
+    """Deduplicate entries. When same day has entries from different sources
+    with names starting with the same string, keep only the one with most characters."""
+    # First pass: collect all entries by date
+    by_date = {}
     for entry in entries:
-        if entry in seen:
+        date_str, name, source = entry
+        if date_str not in by_date:
+            by_date[date_str] = []
+        by_date[date_str].append(entry)
+    
+    # Second pass: deduplicate within each date
+    deduped = []
+    for date_str, date_entries in by_date.items():
+        if len(date_entries) == 1:
+            deduped.append(date_entries[0])
             continue
-        seen.add(entry)
-        deduped.append(entry)
+        
+        # Multiple entries for same date - check if names start with same string
+        seen_prefixes = {}
+        for entry in date_entries:
+            date_str, name, source = entry
+            # Find if any existing prefix matches the start of this name
+            matched = False
+            for existing_name in list(seen_prefixes.keys()):
+                # Check if they share a common start (the shorter one)
+                min_len = min(len(name), len(existing_name))
+                if name[:min_len] == existing_name[:min_len]:
+                    # Same prefix - keep the longer one
+                    if len(name) > len(existing_name):
+                        # Replace with this entry
+                        del seen_prefixes[existing_name]
+                        seen_prefixes[name] = entry
+                    matched = True
+                    break
+            
+            if not matched:
+                seen_prefixes[name] = entry
+        
+        # Add the deduplicated entries for this date
+        deduped.extend(seen_prefixes.values())
+    
     return deduped
 
 

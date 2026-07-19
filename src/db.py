@@ -367,3 +367,61 @@ def get_events_raw(db_path):
             'SELECT event_time, title FROM events ORDER BY event_time ASC, title ASC'
         ).fetchall()
     return rows
+
+
+def get_latest_display_request(db_path, mac_address):
+    """Retrieve the most recent display request and response for a device."""
+    if not mac_address:
+        return None
+    mac_address = normalize_mac(mac_address)
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            'SELECT request_headers, response_body, status_code, created_at FROM display_requests WHERE mac_address = ? ORDER BY created_at DESC LIMIT 1',
+            (mac_address,)
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        'request_headers': json.loads(row[0]) if row[0] else {},
+        'response_body': json.loads(row[1]) if row[1] else {},
+        'status_code': row[2],
+        'created_at': row[3]
+    }
+
+
+def get_latest_device_log(db_path, mac_address):
+    """Retrieve the most recent device log message for a device."""
+    if not mac_address:
+        return None
+    mac_address = normalize_mac(mac_address)
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            'SELECT message, created_at FROM device_logs WHERE mac_address = ? ORDER BY created_at DESC LIMIT 1',
+            (mac_address,)
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        'message': json.loads(row[0]) if row[0] else {},
+        'created_at': row[1]
+    }
+
+
+def delete_device(db_path, mac_address):
+    """Delete a device and all its related logs from the database."""
+    if not mac_address:
+        return False
+    mac_address = normalize_mac(mac_address)
+    try:
+        with sqlite3.connect(db_path) as conn:
+            # Delete from devices table
+            cursor = conn.execute('DELETE FROM devices WHERE mac_address = ?', (mac_address,))
+            deleted_count = cursor.rowcount
+            # Also delete related logs
+            conn.execute('DELETE FROM device_logs WHERE mac_address = ?', (mac_address,))
+            conn.execute('DELETE FROM display_requests WHERE mac_address = ?', (mac_address,))
+            conn.commit()
+        return deleted_count > 0
+    except Exception as e:
+        print(f"Error deleting device {mac_address}: {e}")
+        return False

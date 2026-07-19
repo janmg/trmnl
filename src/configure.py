@@ -1,10 +1,12 @@
 import os
 import requests
 import json
+import time
 from urllib.parse import quote
 from flask import request, render_template_string
 
-from src.db import list_devices, upsert_device_config, get_device_config_row
+from src.db import list_devices, upsert_device_config, get_device_config_row, get_latest_display_request
+from src.timing import align_refresh
 
 def lookup_coordinates_and_timezone(location_str):
     if not location_str:
@@ -148,23 +150,35 @@ def handle_register(db_path, content_dir):
         current_refresh_min = (row['refresh_rate'] or 900) // 60
         last_update = row['last_update'] or "Never"
         try:
-            from datetime import datetime, timedelta
+            from datetime import datetime
             from zoneinfo import ZoneInfo
 
-            refresh_secs = int(row['refresh_rate']) if row['refresh_rate'] else 60
             tz = row['timezone'] or 'Europe/Helsinki'
 
             if last_update and last_update != "Never":
-                # Interpret stored `last_update` as the device-local time
-                # (stored without TZ suffix). Make it timezone-aware so
-                # additions and formatting use the correct timezone.
+                # Get the actual refresh_rate that was communicated to the device
+                # in the most recent /api/display response
+                latest_req = get_latest_display_request(db_path, mac_address)
+                actual_refresh_secs = None
+                
+                if latest_req and latest_req.get('response_body'):
+                    actual_refresh_secs = latest_req['response_body'].get('refresh_rate')
+                
+                # If no actual refresh rate found, fall back to configured value
+                if actual_refresh_secs is None:
+                    actual_refresh_secs = int(row['refresh_rate']) if row['refresh_rate'] else 900
+
                 lu_dt = datetime.strptime(last_update, '%Y-%m-%d %H:%M:%S')
                 try:
                     lu_dt = lu_dt.replace(tzinfo=ZoneInfo(tz))
                 except Exception:
                     lu_dt = lu_dt
 
-                next_dt = lu_dt + timedelta(seconds=refresh_secs)
+                # Calculate next_update based on the actual refresh_rate sent to device
+                last_update_epoch = lu_dt.timestamp()
+                next_refresh_secs = actual_refresh_secs
+                next_dt = datetime.fromtimestamp(last_update_epoch + next_refresh_secs, tz=ZoneInfo(tz))
+
                 try:
                     next_update = next_dt.astimezone(ZoneInfo(tz)).strftime('%Y-%m-%d %H:%M:%S')
                 except Exception:
