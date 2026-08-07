@@ -5,13 +5,13 @@ import time
 from urllib.parse import quote
 from flask import request, render_template_string
 
-from src.db import list_devices, upsert_device_config, get_device_config_row, get_latest_display_request
+from src.db import list_devices, upsert_device_config, get_device_config_row, get_latest_display_request, add_event
 from src.timing import align_refresh
 
 def lookup_coordinates_and_timezone(location_str):
     if not location_str:
         return None, None
-    
+
     # Defaults
     coords = None
     tz_name = "Europe/Helsinki"
@@ -116,30 +116,75 @@ def handle_register(db_path, content_dir):
     content_options = [f for f in content_options if f not in generated_options]
 
     refresh_options = [1, 5, 15, 60, 1440]
+    row = get_device_config_row(db_path, mac_address)
 
     if request.method == 'POST':
-        selected_items = request.form.getlist('playlist')
-        name = request.form.get('name')
-        location_raw = request.form.get('location', '').strip()
-        location, tz_name = lookup_coordinates_and_timezone(location_raw)
-        refresh_min = int(request.form.get('refresh_rate', 1))
-        refresh_sec = refresh_min * 60
-        flip = 1 if request.form.get('flip') else 0
-        sleep_start = request.form.get('sleep_start', '').strip()
-        sleep_end = request.form.get('sleep_end', '').strip()
-        sleep_weekend = 1 if request.form.get('sleep_weekend') else 0
-        custom_url = request.form.get('custom_url', '').strip()
-        custom_text = request.form.get('custom_text', '').strip()
-        playlist_str = ",".join(selected_items)
+        action = request.form.get('action')
+        if action == 'add_event':
+            event_date = request.form.get('event_date', '').strip()
+            event_time = request.form.get('event_time', '').strip()
+            event_title = request.form.get('event_title', '').strip()
+            if event_date and event_time and event_title:
+                try:
+                    # Parse dd/mm
+                    day_str, month_str = [p.strip() for p in event_date.split('/')]
+                    day = int(day_str)
+                    month = int(month_str)
+                    from datetime import datetime
+                    try:
+                        parsed_time = datetime.strptime(event_time, '%H:%M')
+                    except ValueError:
+                        parsed_time = datetime.strptime(event_time, '%H:%M:%S')
 
-        upsert_device_config(
-            db_path, mac_address, name or f"Device {mac_address[-5:]}", location, playlist_str,
-            refresh_sec, flip, sleep_start, sleep_end, sleep_weekend, tz_name, custom_url, custom_text
-        )
+                    # Get local timezone / current year
+                    from zoneinfo import ZoneInfo
+                    tz_name = 'Europe/Helsinki'
+                    if row and row['timezone']:
+                        tz_name = row['timezone']
+                    now_local = datetime.now(ZoneInfo(tz_name))
+                    current_year = now_local.year
+                    
+                    event_dt_candidate = datetime(current_year, month, day)
+                    if event_dt_candidate.date() < now_local.date():
+                        target_year = current_year + 1
+                    else:
+                        target_year = current_year
+                    
+                    formatted_dt = (
+                        f"{target_year:04d}-{month:02d}-{day:02d} "
+                        f"{parsed_time.strftime('%H:%M:%S')}"
+                    )
+                    if add_event(db_path, mac_address, formatted_dt, event_title):
+                        message = f"Event '{event_title}' added!"
+                    else:
+                        message = "Failed to add event."
+                except Exception as e:
+                    message = f"Invalid date or time format. Please use dd/mm and HH:MM."
+            else:
+                message = "Please provide date (dd/mm), time (HH:MM), and event title."
+        else:
+            selected_items = request.form.getlist('playlist')
+            name = request.form.get('name')
+            location_raw = request.form.get('location', '').strip()
+            location, tz_name = lookup_coordinates_and_timezone(location_raw)
+            refresh_min = int(request.form.get('refresh_rate', 1))
+            refresh_sec = refresh_min * 60
+            flip = 1 if request.form.get('flip') else 0
+            sleep_start = request.form.get('sleep_start', '').strip()
+            sleep_end = request.form.get('sleep_end', '').strip()
+            sleep_weekend = 1 if request.form.get('sleep_weekend') else 0
+            custom_url = request.form.get('custom_url', '').strip()
+            custom_text = request.form.get('custom_text', '').strip()
+            playlist_str = ",".join(selected_items)
 
-        message = f"Device {mac_address} updated!"
-        current_timezone = tz_name
-        current_location = location
+            upsert_device_config(
+                db_path, mac_address, name or f"Device {mac_address[-5:]}", location, playlist_str,
+                refresh_sec, flip, sleep_start, sleep_end, sleep_weekend, tz_name, custom_url, custom_text
+            )
+
+            message = f"Device {mac_address} updated!"
+            current_timezone = tz_name
+            current_location = location
 
     # GET request or after POST: show form
     row = get_device_config_row(db_path, mac_address)
@@ -546,7 +591,7 @@ def handle_register(db_path, content_dir):
                     </div>
 
                     <div class="form-group preview-column">
-                        <label>Selected Thumbnails</label>
+                        <label>items</label>
                         {% if preview_items %}
                         <div class="preview-list">
                             {% for preview in preview_items %}
@@ -555,6 +600,20 @@ def handle_register(db_path, content_dir):
                                     <img src="{{ preview.url }}" alt="{{ preview.name }} thumbnail" loading="lazy">
                                 </a>
                                 <div class="preview-name">{{ preview.name }}</div>
+                                {% if preview.name == 'schedule' %}
+                                <div style="margin-top: 0.5rem; padding: 0.5rem; background: #f8fafc; border: 1px solid var(--border-color); border-radius: 6px;">
+                                    <div style="display: flex; flex-direction: column; gap: 0.4rem;">
+                                        <input form="add-event-form" type="hidden" name="mac_address" value="{{ mac_address }}">
+                                        <input form="add-event-form" type="hidden" name="action" value="add_event">
+                                        <div style="display: flex; gap: 0.4rem;">
+                                            <input form="add-event-form" type="text" name="event_date" placeholder="dd/mm" required style="font-size: 0.8rem; padding: 0.3rem; border: 1px solid var(--border-color); border-radius: 4px; width: 50%;">
+                                            <input form="add-event-form" type="time" name="event_time" step="60" required style="font-size: 0.8rem; padding: 0.3rem; border: 1px solid var(--border-color); border-radius: 4px; width: 50%;">
+                                        </div>
+                                        <input form="add-event-form" type="text" name="event_title" placeholder="Event name" required style="font-size: 0.8rem; padding: 0.3rem; border: 1px solid var(--border-color); border-radius: 4px;">
+                                        <button form="add-event-form" type="submit" style="font-size: 0.8rem; padding: 0.35rem 0.5rem; background-color: #2563eb; color: white; border: none; border-radius: 4px; cursor: pointer;">add event</button>
+                                    </div>
+                                </div>
+                                {% endif %}
                             </div>
                             {% endfor %}
                         </div>
@@ -564,6 +623,7 @@ def handle_register(db_path, content_dir):
                     </div>
                 </div>
             </form>
+            <form id="add-event-form" method="post"></form>
         </div>
     </body>
     </html>

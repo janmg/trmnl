@@ -8,6 +8,66 @@ from zoneinfo import ZoneInfo
 from PIL import Image, ImageDraw, ImageFont
 
 from src.db import get_device_location, get_device_timezone, get_device_name, get_events_raw
+from src.clock import sync_holidays
+
+NTC_CALENDAR_URL = 'https://calendar.google.com/calendar/ical/c_imdloh50miqt4c4o3erqej499g%40group.calendar.google.com/public/basic.ics'
+NTC_DEVICE_MAC = '44:1B:F6:81:9B:FC'
+
+def get_next_ntc_event():
+    """Fetch the next upcoming event from the NTC Google Calendar."""
+    try:
+        res = requests.get(NTC_CALENDAR_URL, timeout=5)
+        if res.status_code != 200:
+            return None
+        
+        ics_data = res.text
+        events = []
+        current_event = {}
+        for line in ics_data.splitlines():
+            line = line.strip()
+            if line == 'BEGIN:VEVENT':
+                current_event = {}
+            elif line == 'END:VEVENT':
+                if current_event:
+                    events.append(current_event)
+                current_event = {}
+            elif ':' in line:
+                k, v = line.split(':', 1)
+                k_base = k.split(';')[0]
+                current_event[k_base] = v
+                
+        now = datetime.now(ZoneInfo('Europe/Helsinki'))
+        future_events = []
+        for e in events:
+            summary = e.get('SUMMARY', '')
+            dtstart_str = e.get('DTSTART', '')
+            if not dtstart_str:
+                continue
+                
+            dt = None
+            if 'T' in dtstart_str:
+                if dtstart_str.endswith('Z'):
+                    dt = datetime.strptime(dtstart_str, '%Y%m%dT%H%M%SZ').replace(tzinfo=timezone.utc).astimezone(ZoneInfo('Europe/Helsinki'))
+                else:
+                    dt = datetime.strptime(dtstart_str, '%Y%m%dT%H%M%S').replace(tzinfo=ZoneInfo('Europe/Helsinki'))
+            else:
+                dt = datetime.strptime(dtstart_str, '%Y%m%d').replace(tzinfo=ZoneInfo('Europe/Helsinki'))
+                
+            if dt.date() >= now.date():
+                future_events.append((dt, summary))
+                
+        if not future_events:
+            return None
+            
+        future_events.sort(key=lambda x: x[0])
+        next_dt, next_summary = future_events[0]
+        
+        # Clean up escaping in summary if needed
+        next_summary = next_summary.replace('\\,', ',').replace('\\;', ';')
+        return next_dt, next_summary
+    except Exception as e:
+        print(f"Error fetching NTC calendar: {e}")
+        return None
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'trmnl.db')
@@ -85,8 +145,8 @@ def get_weather(mac_address=None):
         print(f"Weather error: {e}")
         return None
 
-def get_events(is_generic=False):
-    """Load events from SQLite or return generic fallback."""
+def get_events(is_generic=False, mac_address=None):
+    """Load device events plus shared holidays, with NTC events on its dedicated device."""
     if is_generic:
         return [
             ["1 oct, 12:00", "Miina Sillanpää Day"],
@@ -97,27 +157,86 @@ def get_events(is_generic=False):
             ["8 Dec, 12:00", "Jean Sibelius"]
         ]
 
+    db_events = []
     try:
-        rows = get_events_raw(DB_PATH)
+        rows = get_events_raw(DB_PATH, mac_address)
         if rows:
-            formatted = []
+            today_start = datetime.now().strftime('%Y-%m-%d 00:00:00')
             for event_time, title in rows:
+                str_time = str(event_time)
+                if str_time < today_start:
+                    continue
                 try:
                     dt = datetime.strptime(str(event_time), '%Y-%m-%d %H:%M:%S')
                 except ValueError:
                     try:
                         dt = datetime.strptime(str(event_time), '%Y-%m-%d %H:%M')
                     except ValueError:
-                        formatted.append([str(event_time), title])
+                        db_events.append((None, str_time, title))
                         continue
 
-                display_time = f"{dt.day} {dt.strftime('%b').lower()}, {dt.strftime('%H:%M')}"
-                formatted.append([display_time, title])
-            return formatted
+                db_events.append((dt, None, title))
     except Exception as e:
         print(f"Error loading events from database: {e}")
-    
-    return [["No events", "found"]]
+
+    # Sync holidays following clock rules
+    try:
+        sync_holidays(DB_PATH, mac_address=mac_address)
+    except Exception as e:
+        print(f"Error syncing holidays in schedule: {e}")
+
+    # Query next holiday from database
+    try:
+        import sqlite3
+        today_date_str = datetime.now().strftime('%Y-%m-%d')
+        with sqlite3.connect(DB_PATH) as conn:
+            h_rows = conn.execute(
+                'SELECT date, name FROM holidays WHERE date >= ? ORDER BY date ASC, source ASC',
+                (today_date_str,)
+            ).fetchall()
+        if h_rows:
+            h_date_str, h_name = h_rows[0]
+            h_dt = datetime.strptime(h_date_str, '%Y-%m-%d')
+            # Format holiday entry (all-day event or date without time)
+            db_events.append((h_dt, None, f"Flag: {h_name}"))
+    except Exception as e:
+        print(f"Error loading next holiday: {e}")
+
+    # NTC lesson events belong only to the dedicated NTC device.
+    if mac_address and mac_address.upper() == NTC_DEVICE_MAC:
+        ntc_event = get_next_ntc_event()
+        if ntc_event:
+            ntc_dt, ntc_title = ntc_event
+            db_events.append((ntc_dt.replace(tzinfo=None), None, f"NTC: {ntc_title}"))
+
+    # Sort all events chronologically
+    def sort_key(item):
+        dt, raw_str, _ = item
+        if dt:
+            return dt
+        return datetime.max
+
+    db_events.sort(key=sort_key)
+
+    formatted = []
+    for dt, raw_str, title in db_events[:6]:
+        if dt:
+            if title.startswith("Flag: "):
+                display_time = f"{dt.day} {dt.strftime('%b').lower()}"
+            else:
+                display_time = f"{dt.day} {dt.strftime('%b').lower()}, {dt.strftime('%H:%M')}"
+        else:
+            display_time = raw_str
+
+        # If event name contains ":", move prefix to behind the date
+        if ":" in title:
+            prefix, event_name = title.split(":", 1)
+            display_time = f"{display_time} {prefix.strip()}"
+            title = event_name.strip()
+
+        formatted.append([display_time.lower(), title.lower()])
+
+    return formatted if formatted else [["No events", "found"]]
 
 def generate_schedule(is_generic=False, mac_address=None):
     # 800x480 Grayscale
@@ -249,7 +368,7 @@ def generate_schedule(is_generic=False, mac_address=None):
     c2_x1 = c2_x0 + col_width
     draw.rounded_rectangle([c2_x0, margin_top, c2_x1, height - margin_bottom], radius=15, fill=WHITE, outline=BLACK, width=2)
     
-    events = get_events(is_generic)
+    events = get_events(is_generic, mac_address=mac_address)
     y = margin_top + 20
     for date, desc in events:
         draw.text((c2_x0 + 15, y), date, font=font_small, fill=DARK_GREY)

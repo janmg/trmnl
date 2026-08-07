@@ -22,6 +22,7 @@ from src.clock import generate_clock
 from src.configure import handle_register
 from src.logs import get_logs
 from src.timing import align_refresh, MIN_REFRESH_SECONDS
+from src.influx import write_battery_voltage
 from src.db import (
     init_db,
     get_device,
@@ -290,6 +291,9 @@ def get_display():
             "detail": "Device identification (Access-Token or ID header) is required."
         }), 401
 
+    # Write battery voltage and related metrics to InfluxDB asynchronously
+    write_battery_voltage(mac_address, battery, fw, ssid, rssi)
+
     now_epoch = time.time()
     forced_refresh = None
     next_playlist_index = None
@@ -336,7 +340,8 @@ def get_display():
             content_state = f"{events_hash}-{corrected_dt.strftime('%Y-%m-%d-%H')}"
         elif item == "clock":
             image_url = f"{BASE_URL}/clock?mac_address={mac_q}"
-            # Use align_refresh to compute the next clock boundary and when to fetch it
+            # Clock refreshes at the configured refresh_rate, aligned to period boundaries
+            # (e.g., with 15-minute refresh_rate, clock updates at :00, :15, :30, :45)
             forced_refresh, next_boundary = align_refresh(now_epoch, refresh_rate, refresh_lead_seconds, device_timezone, for_clock=True)
             content_state = f"clock-{next_boundary.strftime('%Y-%m-%d-%H%M')}"
         elif item == "xkcd":
@@ -439,8 +444,8 @@ def get_display():
         return '', 304
 
     update_device_last_seen(
-        DB_PATH, mac_address, filename, battery, fw, ssid, next_refresh, rssi,
-        next_playlist_index, observed_refresh_lead
+        DB_PATH, mac_address, filename, battery, fw, ssid, refresh_rate, rssi,
+        next_playlist_index, observed_refresh_lead, next_refresh
     )
     log_display_request(DB_PATH, mac_address, request_headers, response_data, 200)
 

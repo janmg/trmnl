@@ -4,13 +4,15 @@ import json
 import secrets
 import datetime
 
+LEGACY_EVENTS_DEVICE_MAC = '44:1B:F6:81:9B:FC'
+
 # Column order used whenever a full device row is read back out as a dict.
 DEVICE_COLUMNS = [
     'mac_address', 'name', 'location', 'playlist', 'refresh_rate', 'last_update',
     'last_filename', 'battery_voltage', 'fw_version', 'wifi_ssid', 'rssi', 'flip',
     'sleep_start', 'sleep_end', 'sleep_weekend', 'timezone', 'custom_url',
     'custom_text', 'playlist_index', 'api_key'
-    , 'refresh_lead_seconds', 'refresh_lead_samples'
+    , 'refresh_lead_seconds', 'refresh_lead_samples', 'next_refresh'
 ]
 
 
@@ -57,6 +59,7 @@ def init_db(db_path):
             'ALTER TABLE devices ADD COLUMN rssi TEXT',
             'ALTER TABLE devices ADD COLUMN refresh_lead_seconds REAL DEFAULT 5',
             'ALTER TABLE devices ADD COLUMN refresh_lead_samples INTEGER DEFAULT 0',
+            'ALTER TABLE devices ADD COLUMN next_refresh INTEGER',
         ):
             try:
                 conn.execute(statement)
@@ -75,9 +78,18 @@ def init_db(db_path):
         conn.execute('''
             CREATE TABLE IF NOT EXISTS events (
                 event_time DATETIME NOT NULL,
-                title TEXT NOT NULL
+                title TEXT NOT NULL,
+                mac_address TEXT NOT NULL
             )
         ''')
+        try:
+            conn.execute('ALTER TABLE events ADD COLUMN mac_address TEXT')
+        except sqlite3.OperationalError:
+            pass
+        conn.execute(
+            'UPDATE events SET mac_address = ? WHERE mac_address IS NULL',
+            (LEGACY_EVENTS_DEVICE_MAC,)
+        )
 
         conn.execute('''
             CREATE TABLE IF NOT EXISTS device_logs (
@@ -167,7 +179,7 @@ def register_device(db_path, mac_address, generated_api_key):
         return generated_api_key
 
 
-def update_device_last_seen(db_path, mac_address, last_filename, battery, fw, ssid, refresh_rate, rssi=None, playlist_index=None, observed_lead_seconds=None):
+def update_device_last_seen(db_path, mac_address, last_filename, battery, fw, ssid, refresh_rate, rssi=None, playlist_index=None, observed_lead_seconds=None, next_refresh=None):
     if not mac_address:
         return
     mac_address = normalize_mac(mac_address)
@@ -193,15 +205,15 @@ def update_device_last_seen(db_path, mac_address, last_filename, battery, fw, ss
         if playlist_index is not None:
             conn.execute('''
                 UPDATE devices
-                SET last_update = ?, last_filename = ?, battery_voltage = ?, fw_version = ?, wifi_ssid = ?, rssi = ?, refresh_rate = ?, playlist_index = ?
+                SET last_update = ?, last_filename = ?, battery_voltage = ?, fw_version = ?, wifi_ssid = ?, rssi = ?, refresh_rate = ?, playlist_index = ?, next_refresh = ?
                 WHERE mac_address = ?
-            ''', (now_str, last_filename, battery, fw, ssid, rssi, refresh_rate, playlist_index, mac_address))
+            ''', (now_str, last_filename, battery, fw, ssid, rssi, refresh_rate, playlist_index, next_refresh, mac_address))
         else:
             conn.execute('''
                 UPDATE devices
-                SET last_update = ?, last_filename = ?, battery_voltage = ?, fw_version = ?, wifi_ssid = ?, rssi = ?, refresh_rate = ?
+                SET last_update = ?, last_filename = ?, battery_voltage = ?, fw_version = ?, wifi_ssid = ?, rssi = ?, refresh_rate = ?, next_refresh = ?
                 WHERE mac_address = ?
-            ''', (now_str, last_filename, battery, fw, ssid, rssi, refresh_rate, mac_address))
+            ''', (now_str, last_filename, battery, fw, ssid, rssi, refresh_rate, next_refresh, mac_address))
 
 
 def get_refresh_lead_seconds(db_path, mac_address, default=5.0):
@@ -361,11 +373,34 @@ def get_holidays_for_date(db_path, date_str):
     return names
 
 
-def get_events_raw(db_path):
-    """Return raw (event_time, title) rows from the events table, ordered."""
+def add_event(db_path, mac_address, event_time, title):
+    """Insert a new event for a device into the events table."""
+    mac_address = normalize_mac(mac_address)
+    if not mac_address or not event_time or not title:
+        return False
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                'INSERT INTO events (event_time, title, mac_address) VALUES (?, ?, ?)',
+                (event_time, title, mac_address)
+            )
+            conn.commit()
+        return True
+    except Exception as e:
+        print(f"Error adding event: {e}")
+        return False
+
+
+def get_events_raw(db_path, mac_address):
+    """Return a device's raw (event_time, title) rows, ordered."""
+    mac_address = normalize_mac(mac_address)
+    if not mac_address:
+        return []
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(
-            'SELECT event_time, title FROM events ORDER BY event_time ASC, title ASC'
+            'SELECT event_time, title FROM events WHERE mac_address = ? '
+            'ORDER BY event_time ASC, title ASC',
+            (mac_address,)
         ).fetchall()
     return rows
 
@@ -464,16 +499,17 @@ def cleanup_old_display_requests(db_path):
 
 
 def cleanup_past_events(db_path):
-    """Delete events from the events table that have already passed."""
+    """Delete events from the events table that have already passed (disappear day after event)."""
     try:
         with sqlite3.connect(db_path) as conn:
-            # Get the current datetime
-            now = datetime.datetime.now().isoformat()
+            # Cutoff is the start of today (00:00:00) so events remain visible all through the day they happen,
+            # and disappear starting the day after.
+            today_start = datetime.datetime.now().strftime('%Y-%m-%d 00:00:00')
             
-            # Delete all events with event_time in the past
+            # Delete all events with event_time before today's start
             cursor = conn.execute(
                 'DELETE FROM events WHERE event_time < ?',
-                (now,)
+                (today_start,)
             )
             
             deleted_count = cursor.rowcount

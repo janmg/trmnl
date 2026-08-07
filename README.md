@@ -7,7 +7,11 @@ TRMNL sells ready made devices that can show you a playlist of screens. You can 
 After reading this article from Helsingin Sanomat, it was time to get my own epaper
 https://www.hs.fi/suomi/art-2000011938981.html
 
-I wanted to use DYI from Seeed Studio, put it in an IKEA photoframe and run my own very simple python application to show data I care about. When the device is unconfigured, it has an WIFI endpoint named TRMNL-ABCDEF and when you connect to it, there is a sign-in page where you can choose your own wifi. And also specify a server. My simple application runs on https://trmnl.janmg.com. Once the device resets, it should show a QR code, where you can register a new device to my server. This is useful later when you want to serve different images to different devices. When registered, the MAC address of the device is stored in the sqlite database and for now a mock schedule is displayed. That is my starting point to vibe code the panels with real data.
+I wanted to use Seeed Studio OG DYI KIT from, put it in an IKEA photoframe and run my own very simple python application to show data I care about. My simple application runs on https://trmnl.janmg.com.
+
+When the device is unconfigured, it has an WIFI endpoint named TRMNL-ABCDEF and when you connect to it, there is a sign-in page where you can choose your own wifi. And also specify a server. Once the device resets, it should show a QR code, where you can register a new device to my server. This is useful later when you want to serve different images to different devices. When registered, the MAC address of the device is stored in the sqlite database.
+
+The devive can be configured to display generated data and static content.
 
 ## Seeed Studio
 
