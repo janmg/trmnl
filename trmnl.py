@@ -35,6 +35,7 @@ from src.db import (
     add_log_entries,
     log_display_request,
     normalize_mac,
+    update_low_battery_alert,
     cleanup_old_display_requests,
     cleanup_past_events,
 )
@@ -49,6 +50,8 @@ BASE_URL = 'https://trmnl.janmg.com'
 REFRESH_LEAD_SECONDS = 5
 # Upper bound for the "come back later" refresh rate handed out while the device is inside its configured sleep window, so it can deep sleep for a long stretch instead of polling every minute.
 MAX_SLEEP_REFRESH_SECONDS = 6 * 3600
+LOW_BATTERY_REFRESH_SECONDS = 60 * 60
+LOW_BATTERY_MESSAGE = "time to recharge the battery"
 
 
 def _cleanup_scheduler():
@@ -293,6 +296,7 @@ def get_display():
 
     # Write battery voltage and related metrics to InfluxDB asynchronously
     write_battery_voltage(mac_address, battery, fw, ssid, rssi)
+    low_battery_alert = update_low_battery_alert(DB_PATH, mac_address, battery) if device else False
 
     now_epoch = time.time()
     forced_refresh = None
@@ -323,6 +327,10 @@ def get_display():
         except Exception:
             corrected_dt = datetime.fromtimestamp(now_epoch)
 
+        if low_battery_alert:
+            playlist_items = ["low_battery"]
+            refresh_rate = LOW_BATTERY_REFRESH_SECONDS
+
         if not playlist_items:
             raise LookupError("device has no playlist configured")
 
@@ -334,7 +342,12 @@ def get_display():
 
         content_state = ""
 
-        if item == "schedule":
+        if item == "low_battery":
+            image_url = f"{BASE_URL}/low-battery?mac_address={mac_q}"
+            content_state = "low-battery"
+            next_playlist_index = None
+            forced_refresh = LOW_BATTERY_REFRESH_SECONDS
+        elif item == "schedule":
             image_url = f"{BASE_URL}/schedule?mac_address={mac_q}"
             events_hash = hashlib.md5(str(get_events()).encode('utf-8')).hexdigest()
             content_state = f"{events_hash}-{corrected_dt.strftime('%Y-%m-%d-%H')}"
@@ -564,6 +577,12 @@ def get_text():
             text = dev.get('custom_text')
 
     buf = _safe_generate(generate_titlecard, text)
+    return _serve_image(buf, mac_address)
+
+@app.route('/low-battery')
+def get_low_battery():
+    mac_address = _get_mac_from_request()
+    buf = _safe_generate(generate_titlecard, LOW_BATTERY_MESSAGE)
     return _serve_image(buf, mac_address)
 
 @app.route('/logs')

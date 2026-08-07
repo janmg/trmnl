@@ -12,7 +12,7 @@ DEVICE_COLUMNS = [
     'last_filename', 'battery_voltage', 'fw_version', 'wifi_ssid', 'rssi', 'flip',
     'sleep_start', 'sleep_end', 'sleep_weekend', 'timezone', 'custom_url',
     'custom_text', 'playlist_index', 'api_key'
-    , 'refresh_lead_seconds', 'refresh_lead_samples', 'next_refresh'
+    , 'refresh_lead_seconds', 'refresh_lead_samples', 'next_refresh', 'low_battery_alert'
 ]
 
 
@@ -60,6 +60,7 @@ def init_db(db_path):
             'ALTER TABLE devices ADD COLUMN refresh_lead_seconds REAL DEFAULT 5',
             'ALTER TABLE devices ADD COLUMN refresh_lead_samples INTEGER DEFAULT 0',
             'ALTER TABLE devices ADD COLUMN next_refresh INTEGER',
+            'ALTER TABLE devices ADD COLUMN low_battery_alert INTEGER DEFAULT 0',
         ):
             try:
                 conn.execute(statement)
@@ -286,6 +287,43 @@ def get_device_location(db_path, mac_address):
 
 def get_device_name(db_path, mac_address):
     return get_device_field(db_path, mac_address, 'name')
+
+
+def update_low_battery_alert(db_path, mac_address, battery_voltage):
+    """Update and return a device's low-battery alert state.
+
+    The alert activates below 2.9V and remains active until a reading above 3.0V.
+    Invalid readings leave the existing state unchanged.
+    """
+    mac_address = normalize_mac(mac_address)
+    if not mac_address:
+        return False
+
+    try:
+        voltage = float(battery_voltage)
+    except (TypeError, ValueError):
+        voltage = None
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            'SELECT low_battery_alert FROM devices WHERE mac_address = ?',
+            (mac_address,)
+        ).fetchone()
+        if not row:
+            return False
+
+        alert_active = bool(row[0])
+        if voltage is not None:
+            if voltage < 2.9:
+                alert_active = True
+            elif voltage > 3.0:
+                alert_active = False
+
+        conn.execute(
+            'UPDATE devices SET low_battery_alert = ? WHERE mac_address = ?',
+            (int(alert_active), mac_address),
+        )
+    return alert_active
 
 
 def upsert_device_config(db_path, mac_address, name, location, playlist, refresh_rate,
