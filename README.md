@@ -285,6 +285,10 @@ curl "http://byos.local/api/log" \
 -H 'Content-Type: application/json'
 ```
 
+## Runnint on Azure App Service
+https://learn.microsoft.com/en-gb/azure/app-service/quickstart-python
+Python Flask WSGI
+
 ## Hardware details
 
 The e-paper screen is an GDEY075T7.

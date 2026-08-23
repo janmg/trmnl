@@ -9,6 +9,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from src.db import get_device_location, get_device_timezone, get_device_name, get_events_raw
 from src.clock import sync_holidays
+from src.wilma import get_first_event_start, get_relevant_school_date
 
 NTC_CALENDAR_URL = 'https://calendar.google.com/calendar/ical/c_imdloh50miqt4c4o3erqej499g%40group.calendar.google.com/public/basic.ics'
 NTC_DEVICE_MAC = '44:1B:F6:81:9B:FC'
@@ -166,16 +167,22 @@ def get_events(is_generic=False, mac_address=None):
                 str_time = str(event_time)
                 if str_time < today_start:
                     continue
+                dt = None
+                has_time = True
                 try:
                     dt = datetime.strptime(str(event_time), '%Y-%m-%d %H:%M:%S')
                 except ValueError:
                     try:
                         dt = datetime.strptime(str(event_time), '%Y-%m-%d %H:%M')
                     except ValueError:
-                        db_events.append((None, str_time, title))
-                        continue
+                        try:
+                            dt = datetime.strptime(str(event_time), '%Y-%m-%d')
+                            has_time = False
+                        except ValueError:
+                            db_events.append((None, str_time, title, False))
+                            continue
 
-                db_events.append((dt, None, title))
+                db_events.append((dt, None, title, has_time))
     except Exception as e:
         print(f"Error loading events from database: {e}")
 
@@ -198,7 +205,7 @@ def get_events(is_generic=False, mac_address=None):
             h_date_str, h_name = h_rows[0]
             h_dt = datetime.strptime(h_date_str, '%Y-%m-%d')
             # Format holiday entry (all-day event or date without time)
-            db_events.append((h_dt, None, f"Flag: {h_name}"))
+            db_events.append((h_dt, None, f"Flag: {h_name}", False))
     except Exception as e:
         print(f"Error loading next holiday: {e}")
 
@@ -207,11 +214,11 @@ def get_events(is_generic=False, mac_address=None):
         ntc_event = get_next_ntc_event()
         if ntc_event:
             ntc_dt, ntc_title = ntc_event
-            db_events.append((ntc_dt.replace(tzinfo=None), None, f"NTC: {ntc_title}"))
+            db_events.append((ntc_dt.replace(tzinfo=None), None, f"NTC: {ntc_title}", True))
 
     # Sort all events chronologically
     def sort_key(item):
-        dt, raw_str, _ = item
+        dt, raw_str, _, _ = item
         if dt:
             return dt
         return datetime.max
@@ -219,12 +226,13 @@ def get_events(is_generic=False, mac_address=None):
     db_events.sort(key=sort_key)
 
     formatted = []
-    for dt, raw_str, title in db_events[:6]:
+    for dt, raw_str, title, has_time in db_events[:6]:
         if dt:
-            if title.startswith("Flag: "):
-                display_time = f"{dt.day} {dt.strftime('%b').lower()}"
+            day_abbr = dt.strftime('%a')[:2].lower()
+            if not has_time or title.startswith("Flag: "):
+                display_time = f"{day_abbr} {dt.day} {dt.strftime('%b').lower()}"
             else:
-                display_time = f"{dt.day} {dt.strftime('%b').lower()}, {dt.strftime('%H:%M')}"
+                display_time = f"{day_abbr} {dt.day} {dt.strftime('%b').lower()}, {dt.strftime('%H:%M')}"
         else:
             display_time = raw_str
 
@@ -281,7 +289,7 @@ def generate_schedule(is_generic=False, mac_address=None):
         font_large = ImageFont.truetype(font_path, 28)
         font_large_bold = ImageFont.truetype(font_bold_path, 28)
         font_medium_bold = ImageFont.truetype(font_bold_path, 22)
-        font_huge_bold = ImageFont.truetype(font_bold_path, 48)
+        font_huge_bold = ImageFont.truetype(font_bold_path, 40)
         font_xl = ImageFont.truetype(font_path, 42)
     except:
         font_main = ImageFont.load_default()
@@ -352,47 +360,67 @@ def generate_schedule(is_generic=False, mac_address=None):
     else:
         draw.text((c1_x0 + 20, y), "Weather N/A", font=font_main, fill=BLACK)
 
-    # Appliances box in Column 1 - Colored
+    # Boys' school start times box in Column 1
     app_y0 = height - margin_bottom - 160
     app_x0 = c1_x0 + 10
     app_x1 = c1_x1 - 10
     draw.rounded_rectangle([app_x0, app_y0, app_x1, height - margin_bottom - 10], radius=10, fill=WHITE, outline=DARK_GREY, width=2)
     
-    draw.text((app_x0 + 10, app_y0 + 10), "dishwasher", font=font_main, fill=BLACK)
-    draw.text((app_x0 + 15, app_y0 + 35), "clean", font=font_large, fill=BLACK)
-    draw.text((app_x0 + 10, app_y0 + 80), "washingmachine", font=font_main, fill=BLACK)
-    draw.text((app_x0 + 15, app_y0 + 105), "empty", font=font_large, fill=BLACK)
-
-    # Column 2 - White background
-    c2_x0 = c1_x1 + col_spacing
-    c2_x1 = c2_x0 + col_width
-    draw.rounded_rectangle([c2_x0, margin_top, c2_x1, height - margin_bottom], radius=15, fill=WHITE, outline=BLACK, width=2)
+    school_date = get_relevant_school_date(now)
+    school_day_abbr = school_date.strftime('%a')[:2].lower()
+    niiles_start = get_first_event_start('niiles', target_date=school_date, tz_name=device_tz.key)
+    lorens_start = get_first_event_start('lorens', target_date=school_date, tz_name=device_tz.key)
     
+    niiles_display = f"{school_day_abbr} {niiles_start}" if niiles_start else "-"
+    lorens_display = f"{school_day_abbr} {lorens_start}" if lorens_start else "-"
+    
+    draw.text((app_x0 + 10, app_y0 + 10), "niiles school", font=font_main, fill=BLACK)
+    draw.text((app_x0 + 15, app_y0 + 35), niiles_display, font=font_large, fill=BLACK)
+    draw.text((app_x0 + 10, app_y0 + 80), "lorens school", font=font_main, fill=BLACK)
+    draw.text((app_x0 + 15, app_y0 + 105), lorens_display, font=font_large, fill=BLACK)
+
+    # Column 2 - White background (grown 40px to the right)
+    c2_x0 = c1_x1 + col_spacing
+    c2_x1 = c2_x0 + col_width + 40
+    c2_y0 = margin_top
+    c2_y1 = height - margin_bottom
+    draw.rounded_rectangle([c2_x0, c2_y0, c2_x1, c2_y1], radius=15, fill=WHITE, outline=BLACK, width=2)
+    
+    # Clip text rendering to inner panel boundaries with a WHITE background
+    c2_inner = (c2_x0 + 4, c2_y0 + 4, c2_x1 - 4, c2_y1 - 4)
+    c2_layer = Image.new('L', (width, height), WHITE)
+    c2_draw = ImageDraw.Draw(c2_layer)
+
     events = get_events(is_generic, mac_address=mac_address)
     y = margin_top + 20
     for date, desc in events:
-        draw.text((c2_x0 + 15, y), date, font=font_small, fill=DARK_GREY)
-        draw.text((c2_x0 + 15, y + 20), desc, font=font_medium_bold, fill=BLACK)
+        c2_draw.text((c2_x0 + 15, y), date, font=font_small, fill=DARK_GREY)
+        c2_draw.text((c2_x0 + 15, y + 20), desc, font=font_medium_bold, fill=BLACK)
         y += 60
 
-    # Column 3 - Dark Grey background
+    # Composite clipped white box back onto canvas
+    c2_crop = c2_layer.crop(c2_inner)
+    canvas.paste(c2_crop, c2_inner)
+
+    # Column 3 - Dark Grey background (adjusted x0 by +40px)
     c3_x0 = c2_x1 + col_spacing
-    c3_x1 = c3_x0 + col_width
+    c3_x1 = margin_left + avail_width
     draw.rounded_rectangle([c3_x0, margin_top, c3_x1, height - margin_bottom], radius=15, fill=DARK_GREY, outline=BLACK, width=2)
     
+    c3_width = c3_x1 - c3_x0
     # Fixed text in Column 3 - White text on Dark Grey
     lines = ["HOME", "IS", "WHERE", "YOUR", "WIFI IS"]
-    y = margin_top + 40
+    y = margin_top + 45
     for line in lines:
         # Simple horizontal centering
         try:
             bbox = draw.textbbox((0, 0), line, font=font_huge_bold)
             tw = bbox[2] - bbox[0]
-            tx = c3_x0 + (col_width - tw) // 2
+            tx = c3_x0 + (c3_width - tw) // 2
         except:
             tx = c3_x0 + 10
         draw.text((tx, y), line, font=font_huge_bold, fill=WHITE)
-        y += 65
+        y += 58
 
     buf = io.BytesIO()
     canvas.save(buf, format='PNG')
