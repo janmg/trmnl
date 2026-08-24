@@ -285,9 +285,33 @@ curl "http://byos.local/api/log" \
 -H 'Content-Type: application/json'
 ```
 
-## Runnint on Azure App Service
+## WSGI
+The Python Flask application can be deployed as WSGI package to a hosting provider
+
+* Google App Engine
+* Microsoft Azure App Service
+* AWS Elastic Beanstalk
+* Heroku (https://devcenter.heroku.com/articles/python-support)
+
+### Microsoft Azure App Service
 https://learn.microsoft.com/en-gb/azure/app-service/quickstart-python
-Python Flask WSGI
+
+```
+az login
+az create resource-group trmnl
+az appservice plan create --name trmnl-plan --resource-group trmnl --is-linux --sku F1
+az webapp create --resource-group trmnl --plan trmnl-plan --name trmnl-janmg --runtime "PYTHON:3.13"
+az webapp config set --resource-group trmnl --name trmnl-janmg --linux-fx-version "PYTHON|3.13"
+az webapp config set --resource-group trmnl --name trmnl-janmg --startup-file "gunicorn --bind=0.0.0.0 --timeout 600 trmnl:app"
+az webapp config appsettings set --resource-group trmnl --name trmnl-janmg --settings SCM_DO_BUILD_DURING_DEPLOYMENT=true
+az webapp up --resource-group trmnl --name trmnl-janmg --runtime "PYTHON:3.13"
+
+zip -r app.zip . -x "*.git*" -x "__pycache__/*" -x "*.db" -x ".venv/*"
+az webapp deploy --resource-group trmnl --name trmnl-janmg --src-path app.zip --type zip
+
+az webapp log startup show -n trmnl-janmg -g trmnl
+az webapp troubleshoot status --name trmnl-janmg --resource-group trmnl
+```
 
 ## Hardware details
 
