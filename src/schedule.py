@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import io
 import os
+import re
 import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
@@ -242,6 +243,9 @@ def get_events(is_generic=False, mac_address=None):
             display_time = f"{display_time} {prefix.strip()}"
             title = event_name.strip()
 
+        # Wilma sometimes repeats a course's base code after its detailed code.
+        title = re.sub(r'\b([a-z]+\d+)(\.\d+)(?:\s*[,:;/-]?\s*\1\b)+', r'\1\2', title, flags=re.IGNORECASE)
+
         formatted.append([display_time.lower(), title.lower()])
 
     return formatted if formatted else [["No events", "found"]]
@@ -269,10 +273,10 @@ def generate_schedule(is_generic=False, mac_address=None):
     now = datetime.now(device_tz)
     
     # Margins: 50px left/right, 60px bottom (increased to leave more whitespace)
-    margin_left = 50
-    margin_right = 50
-    margin_bottom = 60
-    margin_top = 30
+    margin_left = 55
+    margin_right = 55
+    margin_bottom = 65
+    margin_top = 20
     
     avail_width = width - margin_left - margin_right
     avail_height = height - margin_top - margin_bottom
@@ -320,7 +324,7 @@ def generate_schedule(is_generic=False, mac_address=None):
         except Exception:
             pass
             
-    draw.text((c1_x0 + 15, y), display_title, font=font_large, fill=BLACK)
+    draw.text((c1_x0 + 15, y), display_title, font=font_large, fill=WHITE)
     
     # Weather sub-box
     weather_y0 = margin_top + 60
@@ -379,9 +383,9 @@ def generate_schedule(is_generic=False, mac_address=None):
     draw.text((app_x0 + 10, app_y0 + 80), "lorens school", font=font_main, fill=BLACK)
     draw.text((app_x0 + 15, app_y0 + 105), lorens_display, font=font_large, fill=BLACK)
 
-    # Column 2 - White background (grown 40px to the right)
+    # Column 2 - White background, using the space formerly occupied by the slogan panel
     c2_x0 = c1_x1 + col_spacing
-    c2_x1 = c2_x0 + col_width + 40
+    c2_x1 = width - margin_right
     c2_y0 = margin_top
     c2_y1 = height - margin_bottom
     draw.rounded_rectangle([c2_x0, c2_y0, c2_x1, c2_y1], radius=15, fill=WHITE, outline=BLACK, width=2)
@@ -401,26 +405,6 @@ def generate_schedule(is_generic=False, mac_address=None):
     # Composite clipped white box back onto canvas
     c2_crop = c2_layer.crop(c2_inner)
     canvas.paste(c2_crop, c2_inner)
-
-    # Column 3 - Dark Grey background (adjusted x0 by +40px)
-    c3_x0 = c2_x1 + col_spacing
-    c3_x1 = margin_left + avail_width
-    draw.rounded_rectangle([c3_x0, margin_top, c3_x1, height - margin_bottom], radius=15, fill=DARK_GREY, outline=BLACK, width=2)
-    
-    c3_width = c3_x1 - c3_x0
-    # Fixed text in Column 3 - White text on Dark Grey
-    lines = ["HOME", "IS", "WHERE", "YOUR", "WIFI IS"]
-    y = margin_top + 45
-    for line in lines:
-        # Simple horizontal centering
-        try:
-            bbox = draw.textbbox((0, 0), line, font=font_huge_bold)
-            tw = bbox[2] - bbox[0]
-            tx = c3_x0 + (c3_width - tw) // 2
-        except:
-            tx = c3_x0 + 10
-        draw.text((tx, y), line, font=font_huge_bold, fill=WHITE)
-        y += 58
 
     buf = io.BytesIO()
     canvas.save(buf, format='PNG')
