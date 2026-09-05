@@ -289,10 +289,26 @@ def get_device_name(db_path, mac_address):
     return get_device_field(db_path, mac_address, 'name')
 
 
+def has_battery(battery_voltage):
+    """Return True if the battery_voltage indicates a battery is present.
+
+    When the client reports 'Battery-Voltage: -1.00' (or <= 0), it is
+    considered not to have a battery.
+    """
+    if battery_voltage is None or battery_voltage == '-':
+        return False
+    try:
+        return float(battery_voltage) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def update_low_battery_alert(db_path, mac_address, battery_voltage):
     """Update and return a device's low-battery alert state.
 
     The alert activates below 2.9V and remains active until a reading above 3.0V.
+    When the client reports -1.00 (or <= 0), the device is considered not to have
+    a battery and the low-battery warning does not apply.
     Invalid readings leave the existing state unchanged.
     """
     mac_address = normalize_mac(mac_address)
@@ -314,7 +330,9 @@ def update_low_battery_alert(db_path, mac_address, battery_voltage):
 
         alert_active = bool(row[0])
         if voltage is not None:
-            if voltage < 2.9:
+            if voltage <= 0:
+                alert_active = False
+            elif voltage < 2.9:
                 alert_active = True
             elif voltage > 3.0:
                 alert_active = False

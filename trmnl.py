@@ -19,6 +19,7 @@ from src.weather import generate_weather
 from src.map import generate_map
 from src.titlecard import generate_titlecard
 from src.clock import generate_clock
+from src.spectra6 import is_spectra6_model, convert_to_spectra6
 from src.configure import handle_register
 from src.logs import get_logs
 from src.timing import align_refresh, MIN_REFRESH_SECONDS
@@ -36,6 +37,7 @@ from src.db import (
     log_display_request,
     normalize_mac,
     update_low_battery_alert,
+    has_battery,
     cleanup_old_display_requests,
     cleanup_past_events,
 )
@@ -44,6 +46,7 @@ app = Flask(__name__)
 
 DB_PATH = 'trmnl.db'
 CONTENT_DIR = os.path.join(os.path.dirname(__file__), 'content')
+CONTENT_IMAGE_EXTENSIONS = ('.png', '.bmp', '.jpg', '.jpeg', '.gif')
 BASE_URL = 'https://trmnl.janmg.com'
 
 # How long before the whole minute the device should wake up to fetch its next image (the ESP32 needs a moment to connect to wifi and refresh the e-paper panel before the target minute actually arrives).
@@ -117,6 +120,15 @@ def _device_should_flip(mac_address):
     dev = get_device(DB_PATH, mac_address)
     return bool(dev and dev.get('flip'))
 
+def _find_content_image(item):
+    """Find a static content image by playlist basename."""
+    for extension in CONTENT_IMAGE_EXTENSIONS:
+        filepath = os.path.join(CONTENT_DIR, f'{item}{extension}')
+        if os.path.isfile(filepath):
+            return filepath
+    return None
+
+
 def apply_rotation(buf, should_flip):
     """Rotate a PNG 180 degrees via Pillow into a new BytesIO buffer."""
     if not should_flip:
@@ -144,6 +156,13 @@ def _serve_image(buf, mac_address, cache_private=False):
 
     should_flip = _device_should_flip(mac_address)
     buf = apply_rotation(buf, should_flip)
+
+    # Color Spectra 6 panels (Waveshare Photo Painter / reTerminal E1002) report
+    # their model in the "Model" header. For those, convert the rendered image
+    # to a dithered 6-color Spectra 6 palette PNG so the firmware decodes it
+    # into the 192 KB 4-bpp framebuffer. Monochrome devices keep the grayscale.
+    if is_spectra6_model(request.headers.get('Model')):
+        buf = convert_to_spectra6(buf)
 
     # Read the PNG bytes and return a plain Response. Using send_file() would make Werkzeug add its own Date/Last-Modified/ETag headers on top of the ones the dev server's http.server handler writes, producing a duplicated "Date" header that nginx rejects with a 502 Bad Gateway.
     buf.seek(0)
@@ -297,6 +316,8 @@ def get_display():
     # Write battery voltage and related metrics to InfluxDB asynchronously
     write_battery_voltage(mac_address, battery, fw, ssid, rssi)
     low_battery_alert = update_low_battery_alert(DB_PATH, mac_address, battery) if device else False
+    if device:
+        device['low_battery_alert'] = int(low_battery_alert)
 
     now_epoch = time.time()
     forced_refresh = None
@@ -350,7 +371,7 @@ def get_display():
         elif item == "schedule":
             image_url = f"{BASE_URL}/schedule?mac_address={mac_q}"
             events_hash = hashlib.md5(str(get_events()).encode('utf-8')).hexdigest()
-            content_state = f"{events_hash}-{corrected_dt.strftime('%Y-%m-%d-%H')}"
+            content_state = f"schedule-layout-2-{events_hash}-{corrected_dt.strftime('%Y-%m-%d-%H')}"
         elif item == "clock":
             image_url = f"{BASE_URL}/clock?mac_address={mac_q}"
             # Clock refreshes at the configured refresh_rate, aligned to period boundaries
@@ -380,10 +401,12 @@ def get_display():
             image_url = f"{BASE_URL}/testcard?mac_address={mac_q}"
             content_state = f"testcard-{corrected_dt.strftime('%Y-%m-%d-%H')}"
         else:
-            # Static PNG stored in the content directory.
-            image_url = f"{BASE_URL}/content/{item}.png?mac_address={mac_q}"
+            # Static image stored in the content directory.
+            content_path = _find_content_image(item)
+            content_filename = os.path.basename(content_path) if content_path else f'{item}.png'
+            image_url = f"{BASE_URL}/content/{content_filename}?mac_address={mac_q}"
             try:
-                mtime = os.path.getmtime(os.path.join(CONTENT_DIR, f"{item}.png"))
+                mtime = os.path.getmtime(content_path)
                 content_state = f"{item}-{int(mtime)}"
             except OSError:
                 content_state = f"{item}-missing"
@@ -482,9 +505,19 @@ def serve_content(filename):
     with open(filepath, 'rb') as f:
         buf = io.BytesIO(f.read())
 
-    if should_flip:
-        buf = apply_rotation(buf, True)
-
+    try:
+        if should_flip:
+            buf = apply_rotation(buf, True)
+        else:
+            image = Image.open(buf)
+            png_buf = io.BytesIO()
+            image.save(png_buf, format='PNG')
+            buf = png_buf
+    except Exception:
+        return jsonify({"status": 415, "title": "Unsupported Media Type", "detail": "Content is not a readable image"}), 415
+    # Color Spectra 6 panels get a dithered 6-color palette PNG (see _serve_image).
+    if is_spectra6_model(request.headers.get('Model')):
+        buf = convert_to_spectra6(buf)
     # Serve raw bytes via a plain Response (not send_file/send_from_directory)
     # so Werkzeug does not add a second Date/Last-Modified/ETag header that
     # would duplicate the dev server's own Date and trigger a 502 at nginx.

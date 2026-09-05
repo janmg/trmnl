@@ -112,7 +112,13 @@ def handle_register(db_path, content_dir):
     
     # Options from static + content directory
     generated_options = ["testcard", "schedule", "xkcd", "fmi", "weather", "clock", "map"]
-    content_options = sorted([f.replace('.png', '') for f in os.listdir(content_dir) if f.endswith('.png')])
+    content_extensions = ('.png', '.bmp', '.jpg', '.jpeg', '.gif')
+    content_files = {}
+    for filename in os.listdir(content_dir):
+        basename, extension = os.path.splitext(filename)
+        if extension.lower() in content_extensions and basename not in content_files:
+            content_files[basename] = filename
+    content_options = sorted(content_files)
     content_options = [f for f in content_options if f not in generated_options]
 
     refresh_options = [1, 5, 15, 60, 1440]
@@ -213,21 +219,15 @@ def handle_register(db_path, content_dir):
                 if actual_refresh_secs is None:
                     actual_refresh_secs = int(row['refresh_rate']) if row['refresh_rate'] else 900
 
-                lu_dt = datetime.strptime(last_update, '%Y-%m-%d %H:%M:%S')
-                try:
-                    lu_dt = lu_dt.replace(tzinfo=ZoneInfo(tz))
-                except Exception:
-                    lu_dt = lu_dt
+                lu_dt = datetime.strptime(last_update, '%Y-%m-%d %H:%M:%S').replace(tzinfo=ZoneInfo('UTC'))
+                device_tz = ZoneInfo(tz)
+                last_update = lu_dt.astimezone(device_tz).strftime('%Y-%m-%d %H:%M:%S')
 
                 # Calculate next_update based on the actual refresh_rate sent to device
                 last_update_epoch = lu_dt.timestamp()
                 next_refresh_secs = actual_refresh_secs
-                next_dt = datetime.fromtimestamp(last_update_epoch + next_refresh_secs, tz=ZoneInfo(tz))
-
-                try:
-                    next_update = next_dt.astimezone(ZoneInfo(tz)).strftime('%Y-%m-%d %H:%M:%S')
-                except Exception:
-                    next_update = next_dt.strftime('%Y-%m-%d %H:%M:%S')
+                next_dt = datetime.fromtimestamp(last_update_epoch + next_refresh_secs, tz=device_tz)
+                next_update = next_dt.strftime('%Y-%m-%d %H:%M:%S')
             else:
                 next_update = "Unknown"
         except Exception:
@@ -290,7 +290,7 @@ def handle_register(db_path, content_dir):
             label = "custom_url"
             preview_url = current_custom_url
         elif item in content_options:
-            preview_url = f"/content/{item}.png"
+            preview_url = f"/content/{content_files[item]}"
 
         if not preview_url:
             continue
