@@ -9,13 +9,11 @@ from src.db import get_device_location
 MAPTILER_API_KEY = "KQgAXC6ARiLV7SshYzas"
 # Using backdrop-v4 as it's cleaner for E-ink
 MAP_STYLE = "backdrop-v4"
-WIDTH = 800
-HEIGHT = 480
 CACHE_DIR = "content/cache/maps"
 DEFAULT_ZOOM = 13
 MAP_RENDER_VERSION = 2
 
-def generate_map(db_path=None, mac_address=None):
+def generate_map(db_path=None, mac_address=None, width=800, height=480, left_margin=50, right_margin=50, top_margin=0, bottom_margin=30):
     # Ensure cache directory exists
     if not os.path.exists(CACHE_DIR):
         os.makedirs(CACHE_DIR, exist_ok=True)
@@ -52,11 +50,15 @@ def generate_map(db_path=None, mac_address=None):
     lat_rad = math.radians(lat)
     world_y = (1.0 - math.log(math.tan(lat_rad) + (1.0 / math.cos(lat_rad))) / math.pi) / 2.0 * n
 
+    # Visible area is the canvas minus all margins
+    visible_width = width - left_margin - right_margin
+    visible_height = height - top_margin - bottom_margin
+
     # Calculate tile range based on standard 512px tiles mapping
-    min_tx = int((world_x - (WIDTH / 2 / 512)) // 1)
-    max_tx = int((world_x + (WIDTH / 2 / 512)) // 1)
-    min_ty = int((world_y - (HEIGHT / 2 / 512)) // 1)
-    max_ty = int((world_y + (HEIGHT / 2 / 512)) // 1)
+    min_tx = int((world_x - (visible_width / 2 / 512)) // 1)
+    max_tx = int((world_x + (visible_width / 2 / 512)) // 1)
+    min_ty = int((world_y - (visible_height / 2 / 512)) // 1)
+    max_ty = int((world_y + (visible_height / 2 / 512)) // 1)
 
     # Create canvas (each tile is 512x512)
     canvas_w = (max_tx - min_tx + 1) * 512
@@ -75,10 +77,14 @@ def generate_map(db_path=None, mac_address=None):
             except Exception as e:
                 print(f"DEBUG: Map tile error {tx}/{ty}: {e}")
 
-    # Crop the window from the stitched tiles
-    crop_x = int((world_x - min_tx) * 512 - (WIDTH // 2))
-    crop_y = int((world_y - min_ty) * 512 - (HEIGHT // 2))
-    img = canvas.crop((crop_x, crop_y, crop_x + WIDTH, crop_y + HEIGHT))
+    # Crop the visible window from the stitched tiles, then pad with white to full canvas size
+    crop_x = int((world_x - min_tx) * 512 - (visible_width // 2))
+    crop_y = int((world_y - min_ty) * 512 - (visible_height // 2))
+    visible_img = canvas.crop((crop_x, crop_y, crop_x + visible_width, crop_y + visible_height))
+
+    # Create full canvas with white margins
+    img = Image.new('RGB', (width, height), (255, 255, 255))
+    img.paste(visible_img, (left_margin, top_margin))
     
     # The non-PSRAM firmware rejects images over 90,000 bytes. Four grayscale
     # levels are sufficient for the e-paper map and produce a substantially

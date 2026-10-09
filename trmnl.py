@@ -19,7 +19,7 @@ from src.weather import generate_weather
 from src.map import generate_map
 from src.titlecard import generate_titlecard
 from src.clock import generate_clock
-from src.spectra6 import is_spectra6_model, convert_to_spectra6
+from src.spectra6 import is_spectra6_model, convert_to_spectra6, convert_to_grayscale
 from src.configure import handle_register
 from src.logs import get_logs
 from src.timing import align_refresh, MIN_REFRESH_SECONDS
@@ -28,11 +28,13 @@ from src.db import (
     init_db,
     get_device,
     get_device_by_api_key,
+    get_latest_display_request,
     device_exists,
     register_device,
     update_device_last_seen,
     get_refresh_lead_seconds,
     get_device_location_timezone,
+    get_device_field,
     add_log_entries,
     log_display_request,
     normalize_mac,
@@ -114,11 +116,49 @@ def _get_mac_from_request():
     mac = request.args.get('mac_address') or request.headers.get('ID') or request.headers.get('Id')
     return mac.strip().upper() if mac else None
 
+def _get_model_from_request():
+    """Use the request's model, or infer it from the device's latest poll."""
+    model = request.headers.get('Model')
+    if model:
+        return model
+    # Allow specifying model via query param for preview mode
+    model = request.args.get('model')
+    if model:
+        return model
+    # Allow specifying model via query param for preview mode
+    model = request.args.get('model')
+    if model:
+        return model
+    # Allow specifying model via query param for preview mode
+    model = request.args.get('model')
+    if model:
+        return model
+    mac_address = _get_mac_from_request()
+    latest_request = get_latest_display_request(DB_PATH, mac_address)
+    if latest_request:
+        return latest_request.get('request_headers', {}).get('Model')
+    return None
+
 def _device_should_flip(mac_address):
     if not mac_address:
         return False
     dev = get_device(DB_PATH, mac_address)
     return bool(dev and dev.get('flip'))
+
+
+def _should_apply_image_rotation(mac_address, *, preview=False, device_flip=None):
+    """Preview renders should stay upright even if the device is configured upside-down."""
+    if preview:
+        return False
+    if device_flip is None:
+        device_flip = _device_should_flip(mac_address)
+    return bool(device_flip)
+
+
+def _request_preview_mode():
+    value = request.args.get('preview', '')
+    return str(value).lower() in {'1', 'true', 'yes'}
+
 
 def _find_content_image(item):
     """Find a static content image by playlist basename."""
@@ -148,21 +188,48 @@ def apply_rotation(buf, should_flip):
         buf.seek(0)
         return buf
 
-def _serve_image(buf, mac_address, cache_private=False):
-    """Apply device rotation, set no-cache headers, and send a PNG buffer.
-    Falls back to the testcard if the generator failed to produce an image."""
+def _serve_image(buf, mac_address, cache_private=False, preview=False, resize_width=None, resize_height=None):
+    """Apply device rotation, apply color dithering, set no-cache headers,
+    and send a PNG buffer.
+    Falls back to the testcard if the generator failed to produce an image.
+    When preview=True with resize dimensions, the image is resized before color conversion."""
     if buf is None:
         buf = generate_testcard(mac_address, device_info={})
 
-    should_flip = _device_should_flip(mac_address)
+    should_flip = _should_apply_image_rotation(mac_address, preview=preview)
     buf = apply_rotation(buf, should_flip)
+
+    # Resize for preview mode
+    if preview and resize_width and resize_height:
+        try:
+            buf.seek(0)
+            img = Image.open(buf)
+            img = img.resize((resize_width, resize_height), Image.LANCZOS)
+            new_buf = io.BytesIO()
+            img.save(new_buf, format='PNG')
+            new_buf.seek(0)
+            buf = new_buf
+        except Exception as e:
+            if app.debug:
+                print(f"ERROR in preview resize: {str(e)}")
 
     # Color Spectra 6 panels (Waveshare Photo Painter / reTerminal E1002) report
     # their model in the "Model" header. For those, convert the rendered image
     # to a dithered 6-color Spectra 6 palette PNG so the firmware decodes it
-    # into the 192 KB 4-bpp framebuffer. Monochrome devices keep the grayscale.
-    if is_spectra6_model(request.headers.get('Model')):
-        buf = convert_to_spectra6(buf)
+    # into the 192 KB 4-bpp framebuffer. Monochrome devices get 4-level grayscale.
+    model = _get_model_from_request()
+    if is_spectra6_model(model):
+        if preview:
+            # For preview: convert to RGB with Spectra 6 colors (not palette) so browsers can display
+            buf = _convert_to_spectra6_rgb(buf)
+        else:
+            buf = convert_to_spectra6(buf)
+    else:
+        if preview:
+            # For preview: convert to RGB with 4-level grayscale (not palette) so browsers can display
+            buf = _convert_to_grayscale_rgb(buf)
+        else:
+            buf = convert_to_grayscale(buf)
 
     # Read the PNG bytes and return a plain Response. Using send_file() would make Werkzeug add its own Date/Last-Modified/ETag headers on top of the ones the dev server's http.server handler writes, producing a duplicated "Date" header that nginx rejects with a 502 Bad Gateway.
     buf.seek(0)
@@ -173,6 +240,40 @@ def _serve_image(buf, mac_address, cache_private=False):
         cache_control += ', private'
     resp.headers['Cache-Control'] = cache_control
     return resp
+
+
+def _convert_to_spectra6_rgb(buf):
+    """Convert image to RGB with Spectra 6 colors quantized (not palette) for browser preview."""
+    from src.spectra6 import _build_palette_image
+    buf.seek(0)
+    img = Image.open(buf)
+    # Convert to RGB first so quantize sees actual pixel values (not palette
+    # indices). Then quantize to the Spectra 6 palette, then convert back to
+    # RGB so browsers can render the colors.
+    img_rgb = img.convert('RGB')
+    pal_img = img_rgb.quantize(palette=_build_palette_image())
+    rgb_img = pal_img.convert('RGB')
+    out = io.BytesIO()
+    rgb_img.save(out, format='PNG')
+    out.seek(0)
+    return out
+
+
+def _convert_to_grayscale_rgb(buf):
+    """Convert image to RGB with 4-level grayscale (not palette) for browser preview."""
+    from src.spectra6 import _build_gray4_palette_image
+    buf.seek(0)
+    img = Image.open(buf)
+    # Convert to RGB first so quantize sees actual pixel values (not palette
+    # indices). Then quantize to the 4-level grayscale palette, then convert
+    # back to RGB so browsers can render the gray levels.
+    img_rgb = img.convert('RGB')
+    pal_img = img_rgb.quantize(palette=_build_gray4_palette_image())
+    rgb_img = pal_img.convert('RGB')
+    out = io.BytesIO()
+    rgb_img.save(out, format='PNG')
+    out.seek(0)
+    return out
 
 def _safe_generate(generator_fn, *args, **kwargs):
     """Call a content generator and never let it raise: a device fetching an
@@ -467,6 +568,7 @@ def get_display():
     # Record everything the device sent us and everything we sent back, so device-reported fetch failures can be correlated with what the server actually told it to do.
     request_headers = {
         'ID': header_mac,
+        'Model': request.headers.get('Model'),
         'Access-Token': access_token,
         'Battery-Voltage': battery,
         'Fw-Version': fw,
@@ -500,7 +602,8 @@ def serve_content(filename):
         return jsonify({"status": 404, "title": "Not Found", "detail": "File not found"}), 404
 
     mac_address = _get_mac_from_request()
-    should_flip = _device_should_flip(mac_address)
+    is_preview = request.args.get('preview', '').lower() == '1'
+    should_flip = _device_should_flip(mac_address) and not is_preview
 
     with open(filepath, 'rb') as f:
         buf = io.BytesIO(f.read())
@@ -515,21 +618,38 @@ def serve_content(filename):
             buf = png_buf
     except Exception:
         return jsonify({"status": 415, "title": "Unsupported Media Type", "detail": "Content is not a readable image"}), 415
+
     # Color Spectra 6 panels get a dithered 6-color palette PNG (see _serve_image).
-    if is_spectra6_model(request.headers.get('Model')):
+    if is_spectra6_model(_get_model_from_request()):
         buf = convert_to_spectra6(buf)
-    # Serve raw bytes via a plain Response (not send_file/send_from_directory)
-    # so Werkzeug does not add a second Date/Last-Modified/ETag header that
-    # would duplicate the dev server's own Date and trigger a 502 at nginx.
-    buf.seek(0)
-    return make_response(buf.read(), 200, {'Content-Type': 'image/png'})
+    else:
+        # Standard 4-gray panels: a full-color PNG of a photo can exceed the
+        # firmware's MAX_IMAGE_SIZE (90 KB). Convert to a 4-level grayscale
+        # (2-bit) PNG, which matches the panel's actual capability and stays
+        # small. The firmware would reduce the bit depth anyway.
+        buf = convert_to_grayscale(buf)
+
+    # For preview mode, resize to 800x480 if not already
+    rw = int(request.args.get('resize_width')) if request.args.get('resize_width') else None
+    rh = int(request.args.get('resize_height')) if request.args.get('resize_height') else None
+    return _serve_image(buf, mac_address, preview=is_preview, resize_width=rw, resize_height=rh)
 
 @app.route('/schedule')
 def get_schedule():
     mac_address = _get_mac_from_request()
     is_generic = not (mac_address and device_exists(DB_PATH, mac_address))
-    buf = _safe_generate(generate_schedule, is_generic=is_generic, mac_address=mac_address)
-    return _serve_image(buf, mac_address)
+    width = int(get_device_field(DB_PATH, mac_address, 'display_width')) if mac_address else 800
+    height = int(get_device_field(DB_PATH, mac_address, 'display_height')) if mac_address else 480
+    left_margin = int(get_device_field(DB_PATH, mac_address, 'left_margin')) if mac_address else 50
+    right_margin = int(get_device_field(DB_PATH, mac_address, 'right_margin')) if mac_address else 50
+    top_margin = int(get_device_field(DB_PATH, mac_address, 'top_margin')) if mac_address else 0
+    bottom_margin = int(get_device_field(DB_PATH, mac_address, 'bottom_margin')) if mac_address else 30
+    model = _get_model_from_request()
+    buf = _safe_generate(generate_schedule, is_generic=is_generic, mac_address=mac_address, width=width, height=height, left_margin=left_margin, right_margin=right_margin, top_margin=top_margin, bottom_margin=bottom_margin, model=model)
+    preview = _request_preview_mode()
+    rw = int(request.args.get('resize_width')) if request.args.get('resize_width') else None
+    rh = int(request.args.get('resize_height')) if request.args.get('resize_height') else None
+    return _serve_image(buf, mac_address, preview=preview, resize_width=rw, resize_height=rh)
 
 @app.route('/testcard')
 def get_testcard():
@@ -557,19 +677,40 @@ def get_testcard():
             }
 
     buf = _safe_generate(generate_testcard, mac_address, device_info=device_info)
-    return _serve_image(buf, mac_address)
+    preview = _request_preview_mode()
+    rw = int(request.args.get('resize_width')) if request.args.get('resize_width') else None
+    rh = int(request.args.get('resize_height')) if request.args.get('resize_height') else None
+    return _serve_image(buf, mac_address, preview=preview, resize_width=rw, resize_height=rh)
 
 @app.route('/xkcd')
 def get_xkcd():
     mac_address = _get_mac_from_request()
-    buf = _safe_generate(generate_xkcd)
-    return _serve_image(buf, mac_address)
+    width = int(get_device_field(DB_PATH, mac_address, 'display_width')) if mac_address else 800
+    height = int(get_device_field(DB_PATH, mac_address, 'display_height')) if mac_address else 480
+    left_margin = int(get_device_field(DB_PATH, mac_address, 'left_margin')) if mac_address else 50
+    right_margin = int(get_device_field(DB_PATH, mac_address, 'right_margin')) if mac_address else 50
+    top_margin = int(get_device_field(DB_PATH, mac_address, 'top_margin')) if mac_address else 0
+    bottom_margin = int(get_device_field(DB_PATH, mac_address, 'bottom_margin')) if mac_address else 30
+    buf = _safe_generate(generate_xkcd, width=width, height=height, left_margin=left_margin, right_margin=right_margin, top_margin=top_margin, bottom_margin=bottom_margin)
+    preview = _request_preview_mode()
+    rw = int(request.args.get('resize_width')) if request.args.get('resize_width') else None
+    rh = int(request.args.get('resize_height')) if request.args.get('resize_height') else None
+    return _serve_image(buf, mac_address, preview=preview, resize_width=rw, resize_height=rh)
 
 @app.route('/fmi')
 def get_fmi():
     mac_address = _get_mac_from_request()
-    buf = _safe_generate(generate_fmi)
-    return _serve_image(buf, mac_address)
+    width = int(get_device_field(DB_PATH, mac_address, 'display_width')) if mac_address else 800
+    height = int(get_device_field(DB_PATH, mac_address, 'display_height')) if mac_address else 480
+    left_margin = int(get_device_field(DB_PATH, mac_address, 'left_margin')) if mac_address else 50
+    right_margin = int(get_device_field(DB_PATH, mac_address, 'right_margin')) if mac_address else 50
+    top_margin = int(get_device_field(DB_PATH, mac_address, 'top_margin')) if mac_address else 0
+    bottom_margin = int(get_device_field(DB_PATH, mac_address, 'bottom_margin')) if mac_address else 30
+    buf = _safe_generate(generate_fmi, width=width, height=height, left_margin=left_margin, right_margin=right_margin, top_margin=top_margin, bottom_margin=bottom_margin)
+    preview = _request_preview_mode()
+    rw = int(request.args.get('resize_width')) if request.args.get('resize_width') else None
+    rh = int(request.args.get('resize_height')) if request.args.get('resize_height') else None
+    return _serve_image(buf, mac_address, preview=preview, resize_width=rw, resize_height=rh)
 
 @app.route('/weather')
 def get_weather():
@@ -584,20 +725,41 @@ def get_weather():
         if tz:
             tz_name = tz
 
-    buf = _safe_generate(generate_weather, coords=coords, device_tz_name=tz_name)
-    return _serve_image(buf, mac_address)
+    width = int(get_device_field(DB_PATH, mac_address, 'display_width')) if mac_address else 800
+    height = int(get_device_field(DB_PATH, mac_address, 'display_height')) if mac_address else 480
+    left_margin = int(get_device_field(DB_PATH, mac_address, 'left_margin')) if mac_address else 50
+    right_margin = int(get_device_field(DB_PATH, mac_address, 'right_margin')) if mac_address else 50
+    top_margin = int(get_device_field(DB_PATH, mac_address, 'top_margin')) if mac_address else 0
+    bottom_margin = int(get_device_field(DB_PATH, mac_address, 'bottom_margin')) if mac_address else 30
+    buf = _safe_generate(generate_weather, coords=coords, device_tz_name=tz_name, width=width, height=height, left_margin=left_margin, right_margin=right_margin, top_margin=top_margin, bottom_margin=bottom_margin)
+    preview = _request_preview_mode()
+    rw = int(request.args.get('resize_width')) if request.args.get('resize_width') else None
+    rh = int(request.args.get('resize_height')) if request.args.get('resize_height') else None
+    return _serve_image(buf, mac_address, preview=preview, resize_width=rw, resize_height=rh)
 
 @app.route('/map')
 def get_map():
     mac_address = _get_mac_from_request()
-    buf = _safe_generate(generate_map, DB_PATH, mac_address)
-    return _serve_image(buf, mac_address)
+    width = int(get_device_field(DB_PATH, mac_address, 'display_width')) if mac_address else 800
+    height = int(get_device_field(DB_PATH, mac_address, 'display_height')) if mac_address else 480
+    left_margin = int(get_device_field(DB_PATH, mac_address, 'left_margin')) if mac_address else 50
+    right_margin = int(get_device_field(DB_PATH, mac_address, 'right_margin')) if mac_address else 50
+    top_margin = int(get_device_field(DB_PATH, mac_address, 'top_margin')) if mac_address else 0
+    bottom_margin = int(get_device_field(DB_PATH, mac_address, 'bottom_margin')) if mac_address else 30
+    buf = _safe_generate(generate_map, DB_PATH, mac_address, width=width, height=height, left_margin=left_margin, right_margin=right_margin, top_margin=top_margin, bottom_margin=bottom_margin)
+    preview = _request_preview_mode()
+    rw = int(request.args.get('resize_width')) if request.args.get('resize_width') else None
+    rh = int(request.args.get('resize_height')) if request.args.get('resize_height') else None
+    return _serve_image(buf, mac_address, preview=preview, resize_width=rw, resize_height=rh)
 
 @app.route('/clock')
 def get_clock():
     mac_address = _get_mac_from_request()
     buf = _safe_generate(generate_clock, DB_PATH, mac_address)
-    return _serve_image(buf, mac_address, cache_private=True)
+    preview = _request_preview_mode()
+    rw = int(request.args.get('resize_width')) if request.args.get('resize_width') else None
+    rh = int(request.args.get('resize_height')) if request.args.get('resize_height') else None
+    return _serve_image(buf, mac_address, cache_private=True, preview=preview, resize_width=rw, resize_height=rh)
 
 @app.route('/text')
 def get_text():
@@ -610,13 +772,19 @@ def get_text():
             text = dev.get('custom_text')
 
     buf = _safe_generate(generate_titlecard, text)
-    return _serve_image(buf, mac_address)
+    preview = _request_preview_mode()
+    rw = int(request.args.get('resize_width')) if request.args.get('resize_width') else None
+    rh = int(request.args.get('resize_height')) if request.args.get('resize_height') else None
+    return _serve_image(buf, mac_address, preview=preview, resize_width=rw, resize_height=rh)
 
 @app.route('/low-battery')
 def get_low_battery():
     mac_address = _get_mac_from_request()
     buf = _safe_generate(generate_titlecard, LOW_BATTERY_MESSAGE)
-    return _serve_image(buf, mac_address)
+    preview = _request_preview_mode()
+    rw = int(request.args.get('resize_width')) if request.args.get('resize_width') else None
+    rh = int(request.args.get('resize_height')) if request.args.get('resize_height') else None
+    return _serve_image(buf, mac_address, preview=preview, resize_width=rw, resize_height=rh)
 
 @app.route('/logs')
 def logs_endpoint():

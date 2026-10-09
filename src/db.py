@@ -13,6 +13,7 @@ DEVICE_COLUMNS = [
     'sleep_start', 'sleep_end', 'sleep_weekend', 'timezone', 'custom_url',
     'custom_text', 'playlist_index', 'api_key'
     , 'refresh_lead_seconds', 'refresh_lead_samples', 'next_refresh', 'low_battery_alert'
+    , 'display_width', 'display_height', 'left_margin', 'right_margin', 'top_margin', 'bottom_margin'
 ]
 
 
@@ -346,21 +347,25 @@ def update_low_battery_alert(db_path, mac_address, battery_voltage):
 
 def upsert_device_config(db_path, mac_address, name, location, playlist, refresh_rate,
                           flip, sleep_start, sleep_end, sleep_weekend, timezone,
-                          custom_url, custom_text):
+                          custom_url, custom_text, display_width=800, display_height=480,
+                          left_margin=50, right_margin=50, top_margin=0, bottom_margin=30):
     """Insert or update a device's full configuration, as submitted from the
     /configure form."""
     mac_address = normalize_mac(mac_address)
     generated_api_key = secrets.token_urlsafe(16)
     with sqlite3.connect(db_path) as conn:
         conn.execute('''
-            INSERT INTO devices (mac_address, name, location, playlist, refresh_rate, flip, sleep_start, sleep_end, sleep_weekend, timezone, custom_url, custom_text, api_key)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO devices (mac_address, name, location, playlist, refresh_rate, flip, sleep_start, sleep_end, sleep_weekend, timezone, custom_url, custom_text, api_key, display_width, display_height, left_margin, right_margin, top_margin, bottom_margin)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(mac_address) DO UPDATE SET
             name=excluded.name, location=excluded.location, playlist=excluded.playlist, refresh_rate=excluded.refresh_rate,
             flip=excluded.flip, sleep_start=excluded.sleep_start, sleep_end=excluded.sleep_end, sleep_weekend=excluded.sleep_weekend,
             timezone=excluded.timezone, custom_url=excluded.custom_url, custom_text=excluded.custom_text,
-            api_key=COALESCE(devices.api_key, excluded.api_key)
-        ''', (mac_address, name, location, playlist, refresh_rate, flip, sleep_start, sleep_end, sleep_weekend, timezone, custom_url, custom_text, generated_api_key))
+            api_key=COALESCE(devices.api_key, excluded.api_key),
+            display_width=excluded.display_width, display_height=excluded.display_height,
+            left_margin=excluded.left_margin, right_margin=excluded.right_margin,
+            top_margin=excluded.top_margin, bottom_margin=excluded.bottom_margin
+        ''', (mac_address, name, location, playlist, refresh_rate, flip, sleep_start, sleep_end, sleep_weekend, timezone, custom_url, custom_text, generated_api_key, display_width, display_height, left_margin, right_margin, top_margin, bottom_margin))
 
 
 def get_device_config_row(db_path, mac_address):
@@ -374,6 +379,7 @@ def get_device_config_row(db_path, mac_address):
         'name', 'location', 'playlist', 'refresh_rate', 'last_update', 'last_filename',
         'battery_voltage', 'fw_version', 'wifi_ssid', 'flip', 'sleep_start', 'sleep_end',
         'sleep_weekend', 'timezone', 'custom_url', 'custom_text',
+        'display_width', 'display_height', 'left_margin', 'right_margin', 'top_margin', 'bottom_margin',
     ]
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()

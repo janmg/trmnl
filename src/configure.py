@@ -5,7 +5,7 @@ import time
 from urllib.parse import quote
 from flask import request, render_template_string
 
-from src.db import list_devices, upsert_device_config, get_device_config_row, get_latest_display_request, add_event
+from src.db import list_devices, upsert_device_config, get_device_config_row, get_latest_display_request, add_event, get_latest_device_log
 from src.timing import align_refresh
 
 def lookup_coordinates_and_timezone(location_str):
@@ -110,6 +110,10 @@ def handle_register(db_path, content_dir):
     mac_address = mac_address.upper()
     message = ""
     
+    # Get device model from latest display request
+    latest_req = get_latest_display_request(db_path, mac_address)
+    device_model = latest_req.get('request_headers', {}).get('Model', '') if latest_req else ''
+    
     # Options from static + content directory
     generated_options = ["testcard", "schedule", "xkcd", "fmi", "weather", "clock", "map"]
     content_extensions = ('.png', '.bmp', '.jpg', '.jpeg', '.gif')
@@ -183,9 +187,16 @@ def handle_register(db_path, content_dir):
             custom_text = request.form.get('custom_text', '').strip()
             playlist_str = ",".join(selected_items)
 
+            display_width = int(request.form.get('display_width') or 800)
+            display_height = int(request.form.get('display_height') or 480)
+            left_margin = int(request.form.get('left_margin') or 0)
+            right_margin = int(request.form.get('right_margin') or 0)
+            top_margin = int(request.form.get('top_margin') or 0)
+            bottom_margin = int(request.form.get('bottom_margin') or 0)
             upsert_device_config(
                 db_path, mac_address, name or f"Device {mac_address[-5:]}", location, playlist_str,
-                refresh_sec, flip, sleep_start, sleep_end, sleep_weekend, tz_name, custom_url, custom_text
+                refresh_sec, flip, sleep_start, sleep_end, sleep_weekend, tz_name, custom_url, custom_text,
+                display_width, display_height, left_margin, right_margin, top_margin, bottom_margin
             )
 
             message = f"Device {mac_address} updated!"
@@ -219,9 +230,8 @@ def handle_register(db_path, content_dir):
                 if actual_refresh_secs is None:
                     actual_refresh_secs = int(row['refresh_rate']) if row['refresh_rate'] else 900
 
-                lu_dt = datetime.strptime(last_update, '%Y-%m-%d %H:%M:%S').replace(tzinfo=ZoneInfo('UTC'))
-                device_tz = ZoneInfo(tz)
-                last_update = lu_dt.astimezone(device_tz).strftime('%Y-%m-%d %H:%M:%S')
+                lu_dt = datetime.strptime(last_update, '%Y-%m-%d %H:%M:%S').replace(tzinfo=device_tz)
+                # last_update is already in device timezone, no conversion needed
 
                 # Calculate next_update based on the actual refresh_rate sent to device
                 last_update_epoch = lu_dt.timestamp()
@@ -236,6 +246,35 @@ def handle_register(db_path, content_dir):
         battery = row['battery_voltage'] or "-"
         fw_version = row['fw_version'] or "-"
         wifi_ssid = row['wifi_ssid'] or "-"
+        latest_log = get_latest_device_log(db_path, mac_address)
+        if latest_log:
+            log_msg = latest_log['message']
+            if isinstance(log_msg, dict):
+                last_log = {
+                    'message': log_msg.get('message', ''),
+                    'created_at': '',
+                    'memory_used': '',
+                    'memory_free': '',
+                }
+                created_at = log_msg.get('created_at')
+                if created_at:
+                    try:
+                        from datetime import datetime
+                        from zoneinfo import ZoneInfo
+                        tz = row['timezone'] or 'Europe/Helsinki'
+                        last_log['created_at'] = datetime.fromtimestamp(int(created_at), tz=ZoneInfo(tz)).strftime('%Y-%m-%d %H:%M:%S')
+                    except Exception:
+                        last_log['created_at'] = str(created_at)
+                max_alloc = log_msg.get('max_alloc_size')
+                if max_alloc is not None:
+                    last_log['memory_used'] = f"{int(max_alloc) / 1024:.1f} KB"
+                free_heap = log_msg.get('free_heap_size')
+                if free_heap is not None:
+                    last_log['memory_free'] = f"{int(free_heap) / 1024:.1f} KB"
+            else:
+                last_log = {'message': str(log_msg), 'created_at': '', 'memory_used': '', 'memory_free': ''}
+        else:
+            last_log = None
         current_flip = row['flip'] or 0
         current_sleep_start = row['sleep_start'] or ""
         current_sleep_end = row['sleep_end'] or ""
@@ -243,6 +282,12 @@ def handle_register(db_path, content_dir):
         current_timezone = row['timezone'] or "Europe/Helsinki"
         current_custom_url = row['custom_url'] or ""
         current_custom_text = row['custom_text'] or ""
+        current_display_width = row['display_width'] if row['display_width'] is not None else 800
+        current_display_height = row['display_height'] if row['display_height'] is not None else 480
+        current_left_margin = row['left_margin'] if row['left_margin'] is not None else 0
+        current_right_margin = row['right_margin'] if row['right_margin'] is not None else 0
+        current_top_margin = row['top_margin'] if row['top_margin'] is not None else 0
+        current_bottom_margin = row['bottom_margin'] if row['bottom_margin'] is not None else 0
     else:
         device_name = f"Device {mac_address[-5:]}"
         current_location = ""
@@ -253,6 +298,7 @@ def handle_register(db_path, content_dir):
         battery = "-"
         fw_version = "-"
         wifi_ssid = "-"
+        last_log = None
         current_flip = 0
         current_sleep_start = ""
         current_sleep_end = ""
@@ -260,9 +306,25 @@ def handle_register(db_path, content_dir):
         current_timezone = "Europe/Helsinki"
         current_custom_url = ""
         current_custom_text = ""
+        current_display_width = 800
+        current_display_height = 480
+        current_left_margin = 0
+        current_right_margin = 0
+        current_top_margin = 0
+        current_bottom_margin = 0
         next_update = "Unknown"
 
     mac_encoded = quote(mac_address, safe='')
+
+    # Extract the device model from the latest display request so preview URLs
+    # pass it as a query parameter.  Without this, _get_model_from_request()
+    # in trmnl.py falls back to None and treats every preview as a monochrome
+    # device, converting Spectra 6 color images to grayscale.
+    device_model = None
+    latest_req = get_latest_display_request(db_path, mac_address)
+    if latest_req:
+        device_model = latest_req.get('request_headers', {}).get('Model')
+
     preview_items = []
     for item in current_playlist:
 
@@ -290,10 +352,16 @@ def handle_register(db_path, content_dir):
             label = "custom_url"
             preview_url = current_custom_url
         elif item in content_options:
-            preview_url = f"/content/{content_files[item]}"
+            preview_url = f"/content/{content_files[item]}?mac_address={mac_encoded}"
 
         if not preview_url:
             continue
+
+        if preview_url.startswith('/'):
+            separator = '&' if '?' in preview_url else '?'
+            preview_url += f'{separator}preview=1&resize_width=800&resize_height=480'
+            if device_model:
+                preview_url += f'&model={quote(device_model, safe="")}'
 
         preview_items.append({"name": label, "url": preview_url})
 
@@ -347,6 +415,7 @@ def handle_register(db_path, content_dir):
             }
             .status-item { margin-bottom: 0.25rem; }
             .status-label { font-weight: 600; color: var(--text-muted); min-width: 100px; display: inline-block; }
+            .last-log { font-family: monospace; font-size: 0.8rem; word-break: break-all; }
             label { font-weight: 500; display: block; margin-bottom: 0.25rem; }
             .form-group { margin-bottom: 1.25rem; }
             input[type="text"], select, textarea {
@@ -490,15 +559,56 @@ def handle_register(db_path, content_dir):
                     <div class="config-column">
                         <div class="status-box">
                             <div class="status-item"><span class="status-label">MAC Address:</span> <span class="mac-badge">{{ mac_address }}</span></div>
+                            <div class="status-item"><span class="status-label">Device Model:</span> {{ device_model or '-' }}</div>
                             <div class="status-item"><span class="status-label">Last Update:</span> {{ last_update }}</div>
                             <div class="status-item"><span class="status-label">Next Update:</span> {{ next_update }}</div>
                             <div class="status-item"><span class="status-label">Last File:</span> {{ last_filename }}</div>
                             <div class="status-item"><span class="status-label">Status:</span> {{ battery }}V | {{ fw_version }} | {{ wifi_ssid }}</div>
+                            {% if last_log %}
+                            <div class="status-item"><span class="status-label">Last Log:</span> <span class="last-log">{{ last_log.message }}</span></div>
+                            <div class="status-item"><span class="status-label">Logged At:</span> {{ last_log.created_at }}</div>
+                            <div class="status-item"><span class="status-label">Memory Used:</span> {{ last_log.memory_used }}</div>
+                            <div class="status-item"><span class="status-label">Memory Free:</span> {{ last_log.memory_free }}</div>
+                            {% else %}
+                            <div class="status-item"><span class="status-label">Last Log:</span> <span class="last-log">No logs</span></div>
+                            {% endif %}
                         </div>
 
                         <div class="form-group">
                             <label for="name">Friendly Name</label>
                             <input type="text" id="name" name="name" value="{{ device_name }}" placeholder="My TRMNL Screen">
+                        </div>
+
+                        <div style="display: flex; gap: 0.75rem;">
+                            <div class="form-group" style="flex: 1; margin-bottom: 0;">
+                                <label for="display_width">Width (px)</label>
+                                <input type="number" id="display_width" name="display_width" value="{{ current_display_width }}" min="1" max="4096" placeholder="800">
+                            </div>
+                            <div class="form-group" style="flex: 1; margin-bottom: 0;">
+                                <label for="display_height">Height (px)</label>
+                                <input type="number" id="display_height" name="display_height" value="{{ current_display_height }}" min="1" max="4096" placeholder="480">
+                            </div>
+                        </div>
+
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label for="left_margin">Left Margin (px)</label>
+                                <input type="number" id="left_margin" name="left_margin" value="{{ current_left_margin }}" min="0" max="2048" placeholder="0">
+                            </div>
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label for="right_margin">Right Margin (px)</label>
+                                <input type="number" id="right_margin" name="right_margin" value="{{ current_right_margin }}" min="0" max="2048" placeholder="0">
+                            </div>
+                        </div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 1.25rem;">
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label for="top_margin">Top Margin (px)</label>
+                                <input type="number" id="top_margin" name="top_margin" value="{{ current_top_margin }}" min="0" max="2048" placeholder="0">
+                            </div>
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label for="bottom_margin">Bottom Margin (px)</label>
+                                <input type="number" id="bottom_margin" name="bottom_margin" value="{{ current_bottom_margin }}" min="0" max="2048" placeholder="0">
+                            </div>
                         </div>
 
                         <div class="form-group">
@@ -637,6 +747,8 @@ def handle_register(db_path, content_dir):
                                   message=message, last_update=last_update, last_filename=last_filename,
                                   next_update=next_update,
                                   battery=battery, fw_version=fw_version, wifi_ssid=wifi_ssid,
+                                  last_log=last_log,
+                                  device_model=device_model,
                                   current_location=current_location,
                                   current_flip=current_flip, 
                                   current_sleep_start=current_sleep_start, current_sleep_end=current_sleep_end,

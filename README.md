@@ -329,3 +329,12 @@ The e-paper screen is an GDEY075T7.
 - [https://trmnl.com/dashboard](https://trmnl.com/dashboard)
 
 Firmware v1.6.0 or later to change the palette.
+
+### Waveshare Color Display
+https://files.waveshare.com/wiki/7.3inch-e-Paper-HAT-(E)/7.3inch-e-Paper-(E)-user-manual.pdf
+
+esp32 trmnl og diy
+{"created_at": 1788282316, "id": 1102, "message": "Receiving failed; file size too big: 187586", "source_line": 2029, "source_path": "src/bl.cpp", "wifi_signal": -57, "wifi_status": "connected", "refresh_rate": 285, "sleep_duration": 260, "firmware_version": "1.8.10", "special_function": "none", "battery_voltage": 3.292, "wake_reason": "timer", "free_heap_size": 221828, "max_alloc_size": 208884, "level": "error", "retry": 1}
+
+waveshare photopainter
+{"created_at": 1788262282, "id": 26, "message": "display_show_msg: e-paper update failed", "source_line": 2411, "source_path": "src/display.cpp", "wifi_signal": 0, "wifi_status": "disconnected", "refresh_rate": 0, "sleep_duration": 0, "firmware_version": "1.8.16", "special_function": "none", "battery_voltage": -1, "wake_reason": "powercycle", "free_heap_size": 167372, "max_alloc_size": 94208, "level": "error"}

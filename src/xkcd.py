@@ -2,7 +2,7 @@ import requests
 import io
 from PIL import Image, ImageOps
 
-def generate_xkcd():
+def generate_xkcd(width=800, height=480, left_margin=50, right_margin=50, top_margin=0, bottom_margin=30):
     try:
         # Get metadata for the latest comic
         response = requests.get("https://xkcd.com/info.0.json", timeout=30)
@@ -15,19 +15,14 @@ def generate_xkcd():
         img_response.raise_for_status()
         img = Image.open(io.BytesIO(img_response.content))
         
-        # Target dimensions: 800 x 480
-        # Visible area: (50, 0) to (750, 450) -> Size: 700 x 450
-        # Wait, user said: "50px from the left and 50px from the right are not visible and 30px from the bottom"
-        # Total width: 800. Visible width: 800 - 50 - 50 = 700.
-        # Total height: 480. Visible height: 480 - 30 = 450.
+        # Visible area is the canvas minus all margins
+        visible_width = width - left_margin - right_margin
+        visible_height = height - top_margin - bottom_margin
         
-        visible_width = 700
-        visible_height = 450
+        # Create a white canvas
+        canvas = Image.new('RGB', (width, height), (255, 255, 255))
         
-        # Create a white canvas (800x480)
-        canvas = Image.new('RGB', (800, 480), (255, 255, 255))
-        
-        # Prefer filling vertical space (450px) without cropping.
+        # Prefer filling vertical space without cropping.
         # If that would exceed visible width, fall back to width-constrained scaling.
         scale = visible_height / img.height
         target_w = int(img.width * scale)
@@ -41,9 +36,8 @@ def generate_xkcd():
         img = img.resize((max(1, target_w), max(1, target_h)), Image.Resampling.LANCZOS)
         
         # Calculate position to center the image in the visible area
-        # Visible area centers are: width=(50 to 750), height=(0 to 450)
-        x_offset = 50 + (visible_width - img.width) // 2
-        y_offset = (visible_height - img.height) // 2
+        x_offset = left_margin + (visible_width - img.width) // 2
+        y_offset = top_margin + (visible_height - img.height) // 2
 
         # Paste comic onto canvas
         canvas.paste(img, (x_offset, y_offset))

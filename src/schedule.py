@@ -227,7 +227,7 @@ def get_events(is_generic=False, mac_address=None):
     db_events.sort(key=sort_key)
 
     formatted = []
-    for dt, raw_str, title, has_time in db_events[:6]:
+    for dt, raw_str, title, has_time in db_events[:7]:
         if dt:
             day_abbr = dt.strftime('%a')[:2].lower()
             if not has_time or title.startswith("Flag: "):
@@ -248,19 +248,35 @@ def get_events(is_generic=False, mac_address=None):
 
         formatted.append([display_time.lower(), title.lower()])
 
-    return formatted if formatted else [["No events", "found"]]
+    return formatted[:7] if formatted else [["No events", "found"]]
 
-def generate_schedule(is_generic=False, mac_address=None):
-    # 800x480 Grayscale
-    width, height = 800, 480
-    # 4 tones: black, dark grey, light grey, white
-    BLACK = 0
-    DARK_GREY = 85
-    LIGHT_GREY = 170
-    WHITE = 255
-
-    canvas = Image.new('L', (width, height), WHITE)
-    draw = ImageDraw.Draw(canvas)
+def generate_schedule(is_generic=False, mac_address=None, width=800, height=480, left_margin=50, right_margin=50, top_margin=0, bottom_margin=30, model=None):
+    from src.spectra6 import is_spectra6_model
+    
+    # Detect Spectra 6 color display
+    is_color = is_spectra6_model(model)
+    
+    # Spectra 6 color palette (RGB tuples)
+    # black (0,0,0)=0, white (192,192,192)=1, yellow (192,192,0)=2, 
+    # red (192,0,0)=3, blue (0,0,192)=4, green (0,192,0)=5
+    SPECTRA6_BLACK = (0, 0, 0)
+    SPECTRA6_WHITE = (192, 192, 192)
+    SPECTRA6_YELLOW = (192, 192, 0)
+    SPECTRA6_DARK_BLUE = (0, 0, 192)  # Dark blue for left column background
+    
+    # Grayscale palette for monochrome displays
+    GRAY_BLACK = 0
+    GRAY_DARK_GREY = 85
+    GRAY_LIGHT_GREY = 170
+    GRAY_WHITE = 255
+    
+    # Create canvas based on display type
+    if is_color:
+        canvas = Image.new('RGB', (width, height), SPECTRA6_WHITE)
+        draw = ImageDraw.Draw(canvas)
+    else:
+        canvas = Image.new('L', (width, height), GRAY_WHITE)
+        draw = ImageDraw.Draw(canvas)
     
     # Timezone handling
     device_tz = ZoneInfo("Europe/Helsinki")
@@ -272,11 +288,11 @@ def generate_schedule(is_generic=False, mac_address=None):
 
     now = datetime.now(device_tz)
     
-    # Margins: 50px left/right, 60px bottom (increased to leave more whitespace)
-    margin_left = 55
-    margin_right = 55
-    margin_bottom = 65
-    margin_top = 20
+    # Margins from device configuration
+    margin_left = left_margin
+    margin_right = right_margin
+    margin_bottom = bottom_margin
+    margin_top = top_margin
     
     avail_width = width - margin_left - margin_right
     avail_height = height - margin_top - margin_bottom
@@ -306,10 +322,12 @@ def generate_schedule(is_generic=False, mac_address=None):
 
     weather = get_weather(mac_address=mac_address)
     
-    # Column 1 - Light Grey background
+    # Column 1 - Dark Blue background for Spectra 6, Light Grey for monochrome
     c1_x0 = margin_left
     c1_x1 = c1_x0 + col_width
-    draw.rounded_rectangle([c1_x0, margin_top, c1_x1, height - margin_bottom], radius=15, fill=LIGHT_GREY, outline=BLACK, width=2)
+    c1_fill = SPECTRA6_DARK_BLUE if is_color else GRAY_LIGHT_GREY
+    outline_color = SPECTRA6_BLACK if is_color else GRAY_BLACK
+    draw.rounded_rectangle([c1_x0, margin_top, c1_x1, height - margin_bottom], radius=15, fill=c1_fill, outline=outline_color, width=2)
     
     # Text in Column 1
     y = margin_top + 20
@@ -324,51 +342,56 @@ def generate_schedule(is_generic=False, mac_address=None):
         except Exception:
             pass
             
-    draw.text((c1_x0 + 15, y), display_title, font=font_large, fill=WHITE)
+    title_fill = SPECTRA6_WHITE if is_color else GRAY_WHITE
+    draw.text((c1_x0 + 15, y), display_title, font=font_large, fill=title_fill)
     
     # Weather sub-box
     weather_y0 = margin_top + 60
     weather_y1 = weather_y0 + 150
-    draw.rounded_rectangle([c1_x0 + 10, weather_y0, c1_x1 - 10, weather_y1], radius=10, fill=WHITE, outline=DARK_GREY, width=2)
+    box_fill = SPECTRA6_WHITE if is_color else GRAY_WHITE
+    box_outline = GRAY_DARK_GREY if not is_color else SPECTRA6_BLACK
+    draw.rounded_rectangle([c1_x0 + 10, weather_y0, c1_x1 - 10, weather_y1], radius=10, fill=box_fill, outline=box_outline, width=2)
     
     y = weather_y0 + 10
     if weather:
-        draw.text((c1_x0 + 20, y), f"{weather['current']:.0f}°", font=font_xl, fill=BLACK)
+        draw.text((c1_x0 + 20, y), f"{weather['current']:.0f}°", font=font_xl, fill=SPECTRA6_BLACK if is_color else GRAY_BLACK)
         y += 55
-        draw.text((c1_x0 + 20, y), f"Min: {weather['min']:.1f}°", font=font_main, fill=BLACK)
+        draw.text((c1_x0 + 20, y), f"Min: {weather['min']:.1f}°", font=font_main, fill=SPECTRA6_BLACK if is_color else GRAY_BLACK)
         y += 25
-        draw.text((c1_x0 + 20, y), f"Max: {weather['max']:.1f}°", font=font_main, fill=BLACK)
+        draw.text((c1_x0 + 20, y), f"Max: {weather['max']:.1f}°", font=font_main, fill=SPECTRA6_BLACK if is_color else GRAY_BLACK)
         
         # Weather Icon centered in the sub-box horizontally
         icon_x = c1_x0 + 155
         icon_y = weather_y0 + 45
         import math
         if weather['will_rain']:
-            # Rain Cloud
-            draw.ellipse([icon_x-20, icon_y-10, icon_x, icon_y+10], fill=DARK_GREY)
-            draw.ellipse([icon_x-10, icon_y-20, icon_x+10, icon_y], fill=DARK_GREY)
-            draw.ellipse([icon_x, icon_y-10, icon_x+20, icon_y+10], fill=DARK_GREY)
+            # Rain Cloud - Dark Grey for both
+            cloud_fill = GRAY_DARK_GREY if not is_color else SPECTRA6_WHITE  # White clouds on blue
+            draw.ellipse([icon_x-20, icon_y-10, icon_x, icon_y+10], fill=cloud_fill)
+            draw.ellipse([icon_x-10, icon_y-20, icon_x+10, icon_y], fill=cloud_fill)
+            draw.ellipse([icon_x, icon_y-10, icon_x+20, icon_y+10], fill=cloud_fill)
             for i in range(3):
                 ix = icon_x - 10 + (i*10)
-                draw.line([ix, icon_y+15, ix-5, icon_y+25], fill=BLACK, width=2)
+                draw.line([ix, icon_y+15, ix-5, icon_y+25], fill=SPECTRA6_BLACK if is_color else GRAY_BLACK, width=2)
         else:
-            # Sun
-            draw.ellipse([icon_x-18, icon_y-18, icon_x+18, icon_y+18], outline=BLACK, width=2)
+            # Sun - Yellow for Spectra 6, Dark Grey for monochrome
+            sun_fill = SPECTRA6_YELLOW if is_color else GRAY_DARK_GREY
+            draw.ellipse([icon_x-18, icon_y-18, icon_x+18, icon_y+18], fill=sun_fill, outline=SPECTRA6_BLACK if is_color else GRAY_BLACK, width=2)
             for i in range(8):
                 angle = i * (math.pi / 4)
                 x1 = icon_x + 20 * math.cos(angle)
                 y1 = icon_y + 20 * math.sin(angle)
                 x2 = icon_x + 30 * math.cos(angle)
                 y2 = icon_y + 30 * math.sin(angle)
-                draw.line([x1, y1, x2, y2], fill=BLACK, width=2)
+                draw.line([x1, y1, x2, y2], fill=SPECTRA6_BLACK if is_color else GRAY_BLACK, width=2)
     else:
-        draw.text((c1_x0 + 20, y), "Weather N/A", font=font_main, fill=BLACK)
+        draw.text((c1_x0 + 20, y), "Weather N/A", font=font_main, fill=SPECTRA6_BLACK if is_color else GRAY_BLACK)
 
     # Boys' school start times box in Column 1
     app_y0 = height - margin_bottom - 160
     app_x0 = c1_x0 + 10
     app_x1 = c1_x1 - 10
-    draw.rounded_rectangle([app_x0, app_y0, app_x1, height - margin_bottom - 10], radius=10, fill=WHITE, outline=DARK_GREY, width=2)
+    draw.rounded_rectangle([app_x0, app_y0, app_x1, height - margin_bottom - 10], radius=10, fill=box_fill, outline=box_outline, width=2)
     
     school_date = get_relevant_school_date(now)
     school_day_abbr = school_date.strftime('%a')[:2].lower()
@@ -378,28 +401,56 @@ def generate_schedule(is_generic=False, mac_address=None):
     niiles_display = f"{school_day_abbr} {niiles_start}" if niiles_start else "-"
     lorens_display = f"{school_day_abbr} {lorens_start}" if lorens_start else "-"
     
-    draw.text((app_x0 + 10, app_y0 + 10), "niiles school", font=font_main, fill=BLACK)
-    draw.text((app_x0 + 15, app_y0 + 35), niiles_display, font=font_large, fill=BLACK)
-    draw.text((app_x0 + 10, app_y0 + 80), "lorens school", font=font_main, fill=BLACK)
-    draw.text((app_x0 + 15, app_y0 + 105), lorens_display, font=font_large, fill=BLACK)
+    # If both niiles and lorens are empty, try NTC calendar as fallback
+    ntc_event = get_next_ntc_event()
+    if niiles_display == "-" and lorens_display == "" and ntc_event:
+        ntc_dt, ntc_title = ntc_event
+        ntc_day_abbr = ntc_dt.strftime('%a')[:2].lower()
+        ntc_date_str = ntc_dt.strftime('%d %b').lower()
+        niiles_display = f"{ntc_day_abbr} {ntc_date_str}"
+        lorens_display = f"{ntc_title.lower()}"
+    
+    draw.text((app_x0 + 10, app_y0 + 10), "niiles school", font=font_main, fill=SPECTRA6_BLACK if is_color else GRAY_BLACK)
+    draw.text((app_x0 + 15, app_y0 + 35), niiles_display, font=font_large, fill=SPECTRA6_BLACK if is_color else GRAY_BLACK)
+    draw.text((app_x0 + 10, app_y0 + 80), "lorens school", font=font_main, fill=SPECTRA6_BLACK if is_color else GRAY_BLACK)
+    draw.text((app_x0 + 15, app_y0 + 105), lorens_display, font=font_large, fill=SPECTRA6_BLACK if is_color else GRAY_BLACK)
+
+    # NTC school box in Column 1 - between weather and boys' school
+    ntc_y0 = weather_y1 + 20
+    ntc_y1 = app_y0 - 10
+    ntc_x0 = c1_x0 + 10
+    ntc_x1 = c1_x1 - 10
+    draw.rounded_rectangle([ntc_x0, ntc_y0, ntc_x1, ntc_y1], radius=10, fill=box_fill, outline=box_outline, width=2)
+    
+    ntc_date_display = "-"
+    if ntc_event:
+        ntc_dt, ntc_title = ntc_event
+        ntc_date_str = ntc_dt.strftime('%d %b').lower()
+        ntc_date_display = f"ntc {ntc_date_str}"
+    
+    draw.text((ntc_x0 + 10, ntc_y0 + 10), ntc_date_display, font=font_large, fill=SPECTRA6_BLACK if is_color else GRAY_BLACK)
 
     # Column 2 - White background, using the space formerly occupied by the slogan panel
     c2_x0 = c1_x1 + col_spacing
     c2_x1 = width - margin_right
     c2_y0 = margin_top
     c2_y1 = height - margin_bottom
-    draw.rounded_rectangle([c2_x0, c2_y0, c2_x1, c2_y1], radius=15, fill=WHITE, outline=BLACK, width=2)
+    draw.rounded_rectangle([c2_x0, c2_y0, c2_x1, c2_y1], radius=15, fill=box_fill, outline=SPECTRA6_BLACK if is_color else GRAY_BLACK, width=2)
     
     # Clip text rendering to inner panel boundaries with a WHITE background
     c2_inner = (c2_x0 + 4, c2_y0 + 4, c2_x1 - 4, c2_y1 - 4)
-    c2_layer = Image.new('L', (width, height), WHITE)
-    c2_draw = ImageDraw.Draw(c2_layer)
+    if is_color:
+        c2_layer = Image.new('RGB', (width, height), SPECTRA6_WHITE)
+        c2_draw = ImageDraw.Draw(c2_layer)
+    else:
+        c2_layer = Image.new('L', (width, height), GRAY_WHITE)
+        c2_draw = ImageDraw.Draw(c2_layer)
 
     events = get_events(is_generic, mac_address=mac_address)
     y = margin_top + 20
     for date, desc in events:
-        c2_draw.text((c2_x0 + 15, y), date, font=font_small, fill=DARK_GREY)
-        c2_draw.text((c2_x0 + 15, y + 20), desc, font=font_medium_bold, fill=BLACK)
+        c2_draw.text((c2_x0 + 15, y), date, font=font_small, fill=GRAY_DARK_GREY if not is_color else SPECTRA6_BLACK)
+        c2_draw.text((c2_x0 + 15, y + 20), desc, font=font_medium_bold, fill=SPECTRA6_BLACK if is_color else GRAY_BLACK)
         y += 60
 
     # Composite clipped white box back onto canvas
