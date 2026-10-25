@@ -285,6 +285,15 @@ curl "http://byos.local/api/log" \
 -H 'Content-Type: application/json'
 ```
 
+### Crash diagnostics
+
+The server writes diagnostics to the application directory:
+
+* `trmnl.log`: INFO and above (requests, errors with full tracebacks, a heartbeat every 10 minutes with uptime, memory use and thread count). It is rotated at 5 MB and survives restarts, unlike `nohup.out`, which `trmnl.sh` truncates on every start.
+* `trmnl-faults.log`: Python stack dumps when the process receives a fatal signal (for example a segfault, or a gunicorn worker timeout).
+
+A `SIGTERM` is logged as `Received SIGTERM`. A process that disappears without that line and without a traceback was most likely killed by the OS (for example out of memory), so compare the last heartbeat's `rss` value with the time of the crash.
+
 ## WSGI
 The Python Flask application can be deployed as WSGI package to a hosting provider
 

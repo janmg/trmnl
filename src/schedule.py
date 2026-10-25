@@ -8,20 +8,19 @@ from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from PIL import Image, ImageDraw, ImageFont
 
-from src.db import get_device_location, get_device_timezone, get_device_name, get_events_raw
+from src.db import get_device_field, get_device_location, get_device_timezone, get_device_name, get_events_raw
 from src.clock import sync_holidays
-from src.wilma import get_first_event_start, get_relevant_school_date
+from src.wilma import get_first_school_event, get_relevant_school_date
 
 NTC_CALENDAR_URL = 'https://calendar.google.com/calendar/ical/c_imdloh50miqt4c4o3erqej499g%40group.calendar.google.com/public/basic.ics'
 NTC_DEVICE_MAC = '44:1B:F6:81:9B:FC'
 
-def get_next_ntc_event():
-    """Fetch the next upcoming event from the NTC Google Calendar."""
+def get_next_ntc_events():
+    """Fetch the next two upcoming events from the NTC Google Calendar."""
     try:
         res = requests.get(NTC_CALENDAR_URL, timeout=5)
         if res.status_code != 200:
-            return None
-        
+            return []
         ics_data = res.text
         events = []
         current_event = {}
@@ -58,18 +57,40 @@ def get_next_ntc_event():
             if dt.date() >= now.date():
                 future_events.append((dt, summary))
                 
-        if not future_events:
-            return None
-            
         future_events.sort(key=lambda x: x[0])
-        next_dt, next_summary = future_events[0]
-        
-        # Clean up escaping in summary if needed
-        next_summary = next_summary.replace('\\,', ',').replace('\\;', ';')
-        return next_dt, next_summary
+        return [
+            (event_dt, summary.replace('\\,', ',').replace('\\;', ';'))
+            for event_dt, summary in future_events[:2]
+        ]
     except Exception as e:
         print(f"Error fetching NTC calendar: {e}")
-        return None
+        return []
+
+
+def class_from_summary(summary):
+    if not summary:
+        return "-"
+    # Wilma omits the class suffix for this subject in SUMMARY, but this
+    # timetable's SUK_ entry is the SUK_51 course.
+    if re.search(r'(?<![A-Za-z0-9])SUK_(?:\s|$)', summary):
+        return "SUK_51"
+    match = re.search(
+        r'(?<![A-Za-z0-9])y?([A-Z][A-Z0-9]*(?:\.\d+|_[A-Z0-9]+)?)(?![A-Za-z0-9_])',
+        summary,
+    )
+    if match:
+        return match.group(1)
+    return "Suomen ki..." if summary.startswith("Suomen kieli ja kirjallisuus") else "-"
+
+def room_from_location(location):
+    if not location:
+        return ""
+    # Wilma often repeats the room code, e.g. "313 313"
+    words = location.split()
+    half = len(words) // 2
+    if len(words) % 2 == 0 and half and words[:half] == words[half:]:
+        return " ".join(words[:half])
+    return location.strip()
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'trmnl.db')
@@ -212,7 +233,8 @@ def get_events(is_generic=False, mac_address=None):
 
     # NTC lesson events belong only to the dedicated NTC device.
     if mac_address and mac_address.upper() == NTC_DEVICE_MAC:
-        ntc_event = get_next_ntc_event()
+        ntc_events = get_next_ntc_events()
+        ntc_event = ntc_events[0] if ntc_events else None
         if ntc_event:
             ntc_dt, ntc_title = ntc_event
             db_events.append((ntc_dt.replace(tzinfo=None), None, f"NTC: {ntc_title}", True))
@@ -296,6 +318,7 @@ def generate_schedule(is_generic=False, mac_address=None, width=800, height=480,
     
     avail_width = width - margin_left - margin_right
     avail_height = height - margin_top - margin_bottom
+    font_scale = max(0.5, min(2.0, avail_width / 700, avail_height / 450))
     
     col_spacing = 20
     col_width = (avail_width - (2 * col_spacing)) // 3
@@ -304,15 +327,17 @@ def generate_schedule(is_generic=False, mac_address=None, width=800, height=480,
     font_path = os.path.join(BASE_DIR, 'fonts', 'exo2-medium.ttf')
     font_bold_path = os.path.join(BASE_DIR, 'fonts', 'exo2-bold.ttf')
     try:
-        font_main = ImageFont.truetype(font_path, 20)
-        font_small = ImageFont.truetype(font_path, 16)
-        font_large = ImageFont.truetype(font_path, 28)
-        font_large_bold = ImageFont.truetype(font_bold_path, 28)
-        font_medium_bold = ImageFont.truetype(font_bold_path, 22)
-        font_huge_bold = ImageFont.truetype(font_bold_path, 40)
-        font_xl = ImageFont.truetype(font_path, 42)
+        font_main = ImageFont.truetype(font_path, round(20 * font_scale))
+        font_main_bold = ImageFont.truetype(font_bold_path, round(20 * font_scale))
+        font_small = ImageFont.truetype(font_path, round(16 * font_scale))
+        font_large = ImageFont.truetype(font_path, round(28 * font_scale))
+        font_large_bold = ImageFont.truetype(font_bold_path, round(28 * font_scale))
+        font_medium_bold = ImageFont.truetype(font_bold_path, round(22 * font_scale))
+        font_huge_bold = ImageFont.truetype(font_bold_path, round(40 * font_scale))
+        font_xl = ImageFont.truetype(font_path, round(42 * font_scale))
     except:
         font_main = ImageFont.load_default()
+        font_main_bold = ImageFont.load_default()
         font_small = ImageFont.load_default()
         font_large = ImageFont.load_default()
         font_large_bold = ImageFont.load_default()
@@ -347,7 +372,7 @@ def generate_schedule(is_generic=False, mac_address=None, width=800, height=480,
     
     # Weather sub-box
     weather_y0 = margin_top + 60
-    weather_y1 = weather_y0 + 150
+    weather_y1 = weather_y0 + 120
     box_fill = SPECTRA6_WHITE if is_color else GRAY_WHITE
     box_outline = GRAY_DARK_GREY if not is_color else SPECTRA6_BLACK
     draw.rounded_rectangle([c1_x0 + 10, weather_y0, c1_x1 - 10, weather_y1], radius=10, fill=box_fill, outline=box_outline, width=2)
@@ -395,14 +420,14 @@ def generate_schedule(is_generic=False, mac_address=None, width=800, height=480,
     
     school_date = get_relevant_school_date(now)
     school_day_abbr = school_date.strftime('%a')[:2].lower()
-    niiles_start = get_first_event_start('niiles', target_date=school_date, tz_name=device_tz.key)
-    lorens_start = get_first_event_start('lorens', target_date=school_date, tz_name=device_tz.key)
-    
+    niiles_start, niiles_summary, niiles_location = get_first_school_event('niiles', target_date=school_date, tz_name=device_tz.key)
+    lorens_start, lorens_summary, _ = get_first_school_event('lorens', target_date=school_date, tz_name=device_tz.key)
+
     niiles_display = f"{school_day_abbr} {niiles_start}" if niiles_start else "-"
     lorens_display = f"{school_day_abbr} {lorens_start}" if lorens_start else "-"
     
     # If both niiles and lorens are empty, try NTC calendar as fallback
-    ntc_event = get_next_ntc_event()
+    ntc_events = get_next_ntc_events()
     if niiles_display == "-" and lorens_display == "" and ntc_event:
         ntc_dt, ntc_title = ntc_event
         ntc_day_abbr = ntc_dt.strftime('%a')[:2].lower()
@@ -410,25 +435,42 @@ def generate_schedule(is_generic=False, mac_address=None, width=800, height=480,
         niiles_display = f"{ntc_day_abbr} {ntc_date_str}"
         lorens_display = f"{ntc_title.lower()}"
     
-    draw.text((app_x0 + 10, app_y0 + 10), "niiles school", font=font_main, fill=SPECTRA6_BLACK if is_color else GRAY_BLACK)
+    niiles_room = room_from_location(niiles_location)
+    niiles_header = " ".join(part for part in ["niiles", class_from_summary(niiles_summary), niiles_room] if part)
+    draw.text((app_x0 + 10, app_y0 + 10), niiles_header, font=font_main, fill=SPECTRA6_BLACK if is_color else GRAY_BLACK)
     draw.text((app_x0 + 15, app_y0 + 35), niiles_display, font=font_large, fill=SPECTRA6_BLACK if is_color else GRAY_BLACK)
-    draw.text((app_x0 + 10, app_y0 + 80), "lorens school", font=font_main, fill=SPECTRA6_BLACK if is_color else GRAY_BLACK)
+    draw.text((app_x0 + 10, app_y0 + 80), f"lorens {class_from_summary(lorens_summary)}", font=font_main, fill=SPECTRA6_BLACK if is_color else GRAY_BLACK)
     draw.text((app_x0 + 15, app_y0 + 105), lorens_display, font=font_large, fill=SPECTRA6_BLACK if is_color else GRAY_BLACK)
 
     # NTC school box in Column 1 - between weather and boys' school
-    ntc_y0 = weather_y1 + 20
+    ntc_y0 = weather_y1 + 12
     ntc_y1 = app_y0 - 10
     ntc_x0 = c1_x0 + 10
     ntc_x1 = c1_x1 - 10
     draw.rounded_rectangle([ntc_x0, ntc_y0, ntc_x1, ntc_y1], radius=10, fill=box_fill, outline=box_outline, width=2)
     
-    ntc_date_display = "-"
-    if ntc_event:
-        ntc_dt, ntc_title = ntc_event
-        ntc_date_str = ntc_dt.strftime('%d %b').lower()
-        ntc_date_display = f"ntc {ntc_date_str}"
-    
-    draw.text((ntc_x0 + 10, ntc_y0 + 10), ntc_date_display, font=font_large, fill=SPECTRA6_BLACK if is_color else GRAY_BLACK)
+    ntc_dates = [
+        ntc_dt.strftime('%d %b').lower()
+        for ntc_dt, _ in ntc_events
+    ]
+    ntc_fill = SPECTRA6_BLACK if is_color else GRAY_BLACK
+    dates_display = " / ".join(ntc_dates) if ntc_dates else "-"
+    ntc_inner_width = ntc_x1 - ntc_x0 - 16
+    date_font_size = max(12, font_large.size)
+    date_font = ImageFont.truetype(font_path, date_font_size)
+    date_bbox = draw.textbbox((0, 0), dates_display, font=date_font)
+    while date_bbox[2] - date_bbox[0] > ntc_inner_width and date_font_size > 12:
+        date_font_size -= 1
+        date_font = ImageFont.truetype(font_path, date_font_size)
+        date_bbox = draw.textbbox((0, 0), dates_display, font=date_font)
+    date_height = date_bbox[3] - date_bbox[1]
+    content_y = ntc_y0 + max(4, (ntc_y1 - ntc_y0 - date_height) // 2)
+    draw.text(
+        (ntc_x0 + (ntc_x1 - ntc_x0 - (date_bbox[2] - date_bbox[0])) // 2, content_y),
+        dates_display,
+        font=date_font,
+        fill=ntc_fill,
+    )
 
     # Column 2 - White background, using the space formerly occupied by the slogan panel
     c2_x0 = c1_x1 + col_spacing
@@ -447,7 +489,25 @@ def generate_schedule(is_generic=False, mac_address=None, width=800, height=480,
         c2_draw = ImageDraw.Draw(c2_layer)
 
     events = get_events(is_generic, mac_address=mac_address)
-    y = margin_top + 20
+    header_y = margin_top + 12
+    date_time = now.strftime('%a %d %b %H:%M')
+    c2_fill = SPECTRA6_BLACK if is_color else GRAY_BLACK
+    c2_draw.text((c2_x0 + 15, header_y), date_time, font=font_main_bold, fill=c2_fill)
+
+    battery_percent = None
+    if mac_address:
+        try:
+            voltage = float(get_device_field(DB_PATH, mac_address, 'battery_voltage'))
+            if voltage > 0:
+                battery_percent = round(max(0, min(100, (voltage - 3.0) / 1.2 * 100)))
+        except (TypeError, ValueError):
+            pass
+    if battery_percent is not None:
+        battery_display = f"Battery {battery_percent}%"
+        battery_width = c2_draw.textbbox((0, 0), battery_display, font=font_main)[2]
+        c2_draw.text((c2_x1 - 15 - battery_width, header_y), battery_display, font=font_main, fill=c2_fill)
+
+    y = margin_top + 60
     for date, desc in events:
         c2_draw.text((c2_x0 + 15, y), date, font=font_small, fill=GRAY_DARK_GREY if not is_color else SPECTRA6_BLACK)
         c2_draw.text((c2_x0 + 15, y + 20), desc, font=font_medium_bold, fill=SPECTRA6_BLACK if is_color else GRAY_BLACK)

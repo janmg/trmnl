@@ -755,4 +755,10 @@ def handle_register(db_path, content_dir):
                                   current_sleep_weekend=current_sleep_weekend,
                                   current_timezone=current_timezone,
                                   current_custom_url=current_custom_url,
-                                  current_custom_text=current_custom_text)
+                                  current_custom_text=current_custom_text,
+                                  current_display_width=current_display_width,
+                                  current_display_height=current_display_height,
+                                  current_left_margin=current_left_margin,
+                                  current_right_margin=current_right_margin,
+                                  current_top_margin=current_top_margin,
+                                  current_bottom_margin=current_bottom_margin)

@@ -56,12 +56,8 @@ def get_relevant_school_date(now_dt):
 
     return target
 
-def get_first_event_start(child_name, target_date=None, tz_name='Europe/Helsinki'):
-    """
-    Parses /tmp/{child_name}.ics and returns the start time formatted as 'HH:MM'
-    (or '-' / None if no school event) for the first event on .
-    Defaults target_date to today in the specified timezone.
-    """
+def get_first_school_event(child_name, target_date=None, tz_name='Europe/Helsinki'):
+    """Return the first event's start time, summary and room for a school date."""
     local_tz = ZoneInfo(tz_name)
     if target_date is None:
         target_date = datetime.now(local_tz).date()
@@ -70,9 +66,11 @@ def get_first_event_start(child_name, target_date=None, tz_name='Europe/Helsinki
 
     ics_path = f"/tmp/{child_name.lower()}.ics"
     if not os.path.exists(ics_path):
-        return None
+        return None, None, None
 
     first_start = None
+    first_summary = None
+    first_location = None
 
     try:
         with open(ics_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -84,6 +82,8 @@ def get_first_event_start(child_name, target_date=None, tz_name='Europe/Helsinki
             
             dtstart = None
             rrule = None
+            summary = None
+            location = None
             for line in block.splitlines():
                 line = line.strip()
                 if line.startswith('DTSTART'):
@@ -92,6 +92,10 @@ def get_first_event_start(child_name, target_date=None, tz_name='Europe/Helsinki
                         dtstart = parse_ics_datetime(parts[1], tz_name)
                 elif line.startswith('RRULE:'):
                     rrule = line.split(':', 1)[1]
+                elif line.startswith('SUMMARY:'):
+                    summary = line.split(':', 1)[1].replace('\\,', ',').replace('\\;', ';')
+                elif line.startswith('LOCATION:'):
+                    location = line.split(':', 1)[1].replace('\\,', ',').replace('\\;', ';')
 
             if not dtstart:
                 continue
@@ -103,6 +107,8 @@ def get_first_event_start(child_name, target_date=None, tz_name='Europe/Helsinki
                     cur_start = datetime.combine(target_date, event_start_time, tzinfo=local_tz)
                     if first_start is None or cur_start < first_start:
                         first_start = cur_start
+                        first_summary = summary
+                        first_location = location
             else:
                 # For weekly recurrences (or simple matching day-of-week recurrence within start and until dates)
                 until_dt = parse_until_date(rrule, tz_name)
@@ -116,13 +122,20 @@ def get_first_event_start(child_name, target_date=None, tz_name='Europe/Helsinki
                             cur_start = datetime.combine(target_date, event_start_time, tzinfo=local_tz)
                             if first_start is None or cur_start < first_start:
                                 first_start = cur_start
+                                first_summary = summary
+                                first_location = location
 
     except Exception as e:
         print(f"Error reading/parsing {ics_path}: {e}")
 
     if first_start:
-        return first_start.strftime("%H:%M")
-    return None
+        return first_start.strftime("%H:%M"), first_summary, first_location
+    return None, None, None
+
+def get_first_event_start(child_name, target_date=None, tz_name='Europe/Helsinki'):
+    """Return the first school event's start time formatted as 'HH:MM'."""
+    start, _, _ = get_first_school_event(child_name, target_date, tz_name)
+    return start
 
 def get_school_start_times(target_date=None, tz_name='Europe/Helsinki'):
     return {

@@ -65,11 +65,11 @@ def _build_palette_image():
     return pal_image
 
 
-def _quantize_to_spectra6(img):
+def _quantize_to_spectra6(img, dither=Image.Dither.FLOYDSTEINBERG):
     """Quantize an RGB image to the Spectra 6 palette and return a PNG buffer."""
     quantized = img.quantize(
         palette=_build_palette_image(),
-        dither=Image.Dither.FLOYDSTEINBERG,
+        dither=dither,
     )
     new_buf = io.BytesIO()
     quantized.save(new_buf, format='PNG')
@@ -77,7 +77,7 @@ def _quantize_to_spectra6(img):
     return new_buf
 
 
-def convert_to_spectra6(buf):
+def convert_to_spectra6(buf, dither=Image.Dither.FLOYDSTEINBERG):
     """Convert a PNG buffer to a dithered 6-color Spectra 6 palette PNG.
 
     The input buffer may hold any PNG (grayscale, RGB, RGBA, palette). The
@@ -103,13 +103,13 @@ def convert_to_spectra6(buf):
         # Work in RGB so quantization sees true colors regardless of source mode.
         if img.mode != 'RGB':
             img = img.convert('RGB')
-        new_buf = _quantize_to_spectra6(img)
+        new_buf = _quantize_to_spectra6(img, dither=dither)
         if len(new_buf.getvalue()) > MAX_IMAGE_SIZE:
             # Too big for the firmware: soften the high-frequency detail (which
             # is what bloats the dithered PNG) and re-quantize. Color is kept.
             from PIL import ImageFilter
             blurred = img.filter(ImageFilter.GaussianBlur(radius=1))
-            new_buf = _quantize_to_spectra6(blurred)
+            new_buf = _quantize_to_spectra6(blurred, dither=dither)
         new_buf.seek(0)
         return new_buf
     except Exception:
@@ -147,7 +147,7 @@ def _build_gray4_palette_image():
 GRAY_SIZE_LIMIT = 89000
 
 
-def convert_to_grayscale(buf):
+def convert_to_grayscale(buf, dither=Image.Dither.FLOYDSTEINBERG):
     """Convert a PNG buffer to a 4-level grayscale (2-bit) palette PNG.
 
     The standard TRMNL panel is a 4-gray (2-bit) display. The firmware's
@@ -171,7 +171,7 @@ def convert_to_grayscale(buf):
         gray = img.convert('L')
         quantized = gray.quantize(
             palette=_build_gray4_palette_image(),
-            dither=Image.Dither.FLOYDSTEINBERG,
+            dither=dither,
         )
         new_buf = io.BytesIO()
         quantized.save(new_buf, format='PNG', bits=2)

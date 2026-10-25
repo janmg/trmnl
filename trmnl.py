@@ -2,11 +2,16 @@ import os
 import io
 import time
 import hashlib
+import logging
 import secrets
 import threading
 from datetime import datetime, timedelta
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
+
+# Set up before the other imports so that import-time failures are logged as well.
+from src.diagnostics import setup_diagnostics
+setup_diagnostics(os.path.dirname(os.path.abspath(__file__)))
 
 from PIL import Image
 from flask import Flask, request, jsonify, make_response
@@ -45,6 +50,7 @@ from src.db import (
 )
 
 app = Flask(__name__)
+logger = logging.getLogger(__name__)
 
 DB_PATH = 'trmnl.db'
 CONTENT_DIR = os.path.join(os.path.dirname(__file__), 'content')
@@ -74,8 +80,8 @@ def _cleanup_scheduler():
         try:
             cleanup_old_display_requests(DB_PATH)
             cleanup_past_events(DB_PATH)
-        except Exception as e:
-            print(f"Error in cleanup scheduler: {e}")
+        except Exception:
+            logger.exception("Error in cleanup scheduler")
 
 
 # Start the cleanup scheduler in a background thread
@@ -182,13 +188,12 @@ def apply_rotation(buf, should_flip):
         img.save(new_buf, format='PNG')
         new_buf.seek(0)
         return new_buf
-    except Exception as e:
-        if app.debug:
-            print(f"ERROR in apply_rotation: {str(e)}")
+    except Exception:
+        logger.exception("Error in apply_rotation")
         buf.seek(0)
         return buf
 
-def _serve_image(buf, mac_address, cache_private=False, preview=False, resize_width=None, resize_height=None):
+def _serve_image(buf, mac_address, cache_private=False, preview=False, resize_width=None, resize_height=None, dither=True):
     """Apply device rotation, apply color dithering, set no-cache headers,
     and send a PNG buffer.
     Falls back to the testcard if the generator failed to produce an image.
@@ -209,9 +214,8 @@ def _serve_image(buf, mac_address, cache_private=False, preview=False, resize_wi
             img.save(new_buf, format='PNG')
             new_buf.seek(0)
             buf = new_buf
-        except Exception as e:
-            if app.debug:
-                print(f"ERROR in preview resize: {str(e)}")
+        except Exception:
+            logger.exception("Error in preview resize")
 
     # Color Spectra 6 panels (Waveshare Photo Painter / reTerminal E1002) report
     # their model in the "Model" header. For those, convert the rendered image
@@ -221,15 +225,15 @@ def _serve_image(buf, mac_address, cache_private=False, preview=False, resize_wi
     if is_spectra6_model(model):
         if preview:
             # For preview: convert to RGB with Spectra 6 colors (not palette) so browsers can display
-            buf = _convert_to_spectra6_rgb(buf)
+            buf = _convert_to_spectra6_rgb(buf, dither=dither)
         else:
-            buf = convert_to_spectra6(buf)
+            buf = convert_to_spectra6(buf, dither=Image.Dither.FLOYDSTEINBERG if dither else Image.Dither.NONE)
     else:
         if preview:
             # For preview: convert to RGB with 4-level grayscale (not palette) so browsers can display
-            buf = _convert_to_grayscale_rgb(buf)
+            buf = _convert_to_grayscale_rgb(buf, dither=dither)
         else:
-            buf = convert_to_grayscale(buf)
+            buf = convert_to_grayscale(buf, dither=Image.Dither.FLOYDSTEINBERG if dither else Image.Dither.NONE)
 
     # Read the PNG bytes and return a plain Response. Using send_file() would make Werkzeug add its own Date/Last-Modified/ETag headers on top of the ones the dev server's http.server handler writes, producing a duplicated "Date" header that nginx rejects with a 502 Bad Gateway.
     buf.seek(0)
@@ -242,7 +246,7 @@ def _serve_image(buf, mac_address, cache_private=False, preview=False, resize_wi
     return resp
 
 
-def _convert_to_spectra6_rgb(buf):
+def _convert_to_spectra6_rgb(buf, dither=True):
     """Convert image to RGB with Spectra 6 colors quantized (not palette) for browser preview."""
     from src.spectra6 import _build_palette_image
     buf.seek(0)
@@ -251,7 +255,10 @@ def _convert_to_spectra6_rgb(buf):
     # indices). Then quantize to the Spectra 6 palette, then convert back to
     # RGB so browsers can render the colors.
     img_rgb = img.convert('RGB')
-    pal_img = img_rgb.quantize(palette=_build_palette_image())
+    pal_img = img_rgb.quantize(
+        palette=_build_palette_image(),
+        dither=Image.Dither.FLOYDSTEINBERG if dither else Image.Dither.NONE,
+    )
     rgb_img = pal_img.convert('RGB')
     out = io.BytesIO()
     rgb_img.save(out, format='PNG')
@@ -259,7 +266,7 @@ def _convert_to_spectra6_rgb(buf):
     return out
 
 
-def _convert_to_grayscale_rgb(buf):
+def _convert_to_grayscale_rgb(buf, dither=True):
     """Convert image to RGB with 4-level grayscale (not palette) for browser preview."""
     from src.spectra6 import _build_gray4_palette_image
     buf.seek(0)
@@ -268,7 +275,10 @@ def _convert_to_grayscale_rgb(buf):
     # indices). Then quantize to the 4-level grayscale palette, then convert
     # back to RGB so browsers can render the gray levels.
     img_rgb = img.convert('RGB')
-    pal_img = img_rgb.quantize(palette=_build_gray4_palette_image())
+    pal_img = img_rgb.quantize(
+        palette=_build_gray4_palette_image(),
+        dither=Image.Dither.FLOYDSTEINBERG if dither else Image.Dither.NONE,
+    )
     rgb_img = pal_img.convert('RGB')
     out = io.BytesIO()
     rgb_img.save(out, format='PNG')
@@ -282,9 +292,8 @@ def _safe_generate(generator_fn, *args, **kwargs):
     failed GET and never retry the same content again."""
     try:
         return generator_fn(*args, **kwargs)
-    except Exception as e:
-        if app.debug:
-            print(f"GENERATOR ERROR in {generator_fn.__name__}: {e}")
+    except Exception:
+        logger.exception("Generator error in %s", generator_fn.__name__)
         return None
 
 def is_device_sleeping(dt, sleep_start, sleep_end, sleep_weekend):
@@ -345,9 +354,8 @@ def setup():
     candidate_key = ''.join(secrets.choice(key_alphabet) for _ in range(22))
     try:
         api_key = register_device(DB_PATH, mac_address, candidate_key)
-    except Exception as e:
-        if app.debug:
-            print(f"SETUP ERROR for {mac_address}: {e}")
+    except Exception:
+        logger.exception("Setup error for %s", mac_address)
         return jsonify({
             "status": 500,
             "title": "Internal Server Error",
@@ -521,8 +529,10 @@ def get_display():
         filename = f"{item}-{state_hash}.png"
 
     except Exception as e:
-        if app.debug:
-            print(f"DISPLAY ERROR for {mac_address}: {e}")
+        if isinstance(e, LookupError):
+            logger.warning("Display fallback for %s: %s", mac_address, e)
+        else:
+            logger.exception("Display error for %s", mac_address)
         # Unregistered device, no playlist, or any other error: fall back to
         # the testcard and poll again soon (this also drives new devices
         # towards the /configure registration flow).
@@ -649,7 +659,7 @@ def get_schedule():
     preview = _request_preview_mode()
     rw = int(request.args.get('resize_width')) if request.args.get('resize_width') else None
     rh = int(request.args.get('resize_height')) if request.args.get('resize_height') else None
-    return _serve_image(buf, mac_address, preview=preview, resize_width=rw, resize_height=rh)
+    return _serve_image(buf, mac_address, preview=preview, resize_width=rw, resize_height=rh, dither=False)
 
 @app.route('/testcard')
 def get_testcard():

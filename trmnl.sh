@@ -5,6 +5,11 @@ APP_NAME="trmnl"
 SCRIPT_PATH="/usr/src/trmnl/trmnl.py"
 LOG_FILE="/usr/src/trmnl/nohup.out"
 CACHE_DIR="/usr/src/trmnl/content/cache"
+STOP_TIMEOUT=30
+
+app_pids() {
+    pgrep -f "python $SCRIPT_PATH" || true
+}
 
 reset_cache() {
     if [ -d "$CACHE_DIR" ]; then
@@ -14,7 +19,7 @@ reset_cache() {
 }
 
 start() {
-    if pgrep -f "python $SCRIPT_PATH" > /dev/null 2>&1; then
+    if app_pids | grep -q .; then
         echo "$APP_NAME is already running."
     else
         echo "Starting $APP_NAME..."
@@ -25,16 +30,35 @@ start() {
 }
 
 stop() {
-    if pgrep -f "python $SCRIPT_PATH" > /dev/null 2>&1; then
+    local pids
+    mapfile -t pids < <(app_pids)
+    if [ "${#pids[@]}" -gt 0 ]; then
         echo "Stopping $APP_NAME..."
-        pkill -f "python $SCRIPT_PATH"
+        kill -TERM "${pids[@]}"
+
+        local waited=0
+        while app_pids | grep -q . && [ "$waited" -lt "$STOP_TIMEOUT" ]; do
+            sleep 1
+            ((waited += 1))
+        done
+
+        if app_pids | grep -q .; then
+            echo "$APP_NAME did not stop within ${STOP_TIMEOUT}s; sending SIGKILL."
+            mapfile -t pids < <(app_pids)
+            if [ "${#pids[@]}" -gt 0 ]; then
+                kill -KILL "${pids[@]}"
+            fi
+            while app_pids | grep -q .; do
+                sleep 1
+            done
+        fi
         echo "$APP_NAME stopped."
     fi
 }
 
 status() {
-    if pgrep -f "python $SCRIPT_PATH" > /dev/null 2>&1; then
-        echo "$APP_NAME is running (PID: $(pgrep -f "python $SCRIPT_PATH" | head -1))."
+    if app_pids | grep -q .; then
+        echo "$APP_NAME is running (PID: $(app_pids | head -1))."
     else
         echo "$APP_NAME is stopped."
     fi
@@ -49,7 +73,6 @@ case "$1" in
         ;;
     restart)
         stop
-        sleep 1
         start
         ;;
     status)
